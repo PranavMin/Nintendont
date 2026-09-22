@@ -73,6 +73,41 @@ layout matches devkitPro's own Windows installer.
 
    The kernel does not need this; only `make -C loader`.
 
+6. **Old start files for the loader.** devkitPPC r50's `-mrvl` spec links `crtmain.o` (which
+   calls the libogc 3 `SYS_PreMain`) and its `rvl.ld` (entry `__app_start`); libogc 2.x wants the
+   pre-tuxedo `rvl.ld` (`__stack_addr`, `__intrstack_addr`, `__gxregs`, entry `_start` from
+   libogc's own `ogc_crt0`) and a `__crtmain` that just runs `main` and exits. Put both in a
+   side directory that `-B` will search before the toolchain's own:
+
+   ```bash
+   git clone --filter=blob:none https://github.com/devkitPro/devkitppc-crtls.git ~/crtls-src
+   cd ~/crtls-src && git config core.autocrlf false && git checkout -f v1.0.0   # just gcn/ogc/rvl.ld
+   mkdir -p /c/devkitPro/legacy/crtls/lib && cp *.ld /c/devkitPro/legacy/crtls/lib/
+   cat > /c/devkitPro/legacy/crtls/crtmain.c <<'EOF'
+   /* crtmain for libogc 2.x with devkitPPC r50: the old devkitPPC crtmain.o
+      (__crtmain called from libogc lwp.c __lwp_sysinit): run main, then exit. */
+   #include <stdlib.h>
+   #include <ogc/system.h>
+   extern int main(int argc, char **argv);
+   void __crtmain(void)
+   {
+   	int ret;
+   	if (__system_argv->argvMagic == ARGV_MAGIC)
+   		ret = main(__system_argv->argc, __system_argv->argv);
+   	else
+   		ret = main(0, NULL);
+   	exit(ret);
+   }
+   EOF
+   cd /c/devkitPro/legacy/crtls && $DEVKITPPC/bin/powerpc-eabi-gcc -DGEKKO -mrvl -mcpu=750 -meabi \
+       -mhard-float -O2 -I/c/devkitPro/legacy/libogc/include -c crtmain.c -o lib/crtmain.o
+   ```
+
+   `ecrti.o`, `crtbegin.o`, `crtend.o`, `ecrtn.o`, `libsysbase` and newlib still come from
+   devkitPPC r50. This mix (GCC 16, newlib 4.6, libogc 2.14.1) is **not** what CI ships; the
+   loader it produces links but has not been run on a Wii. For a release-equivalent loader use
+   the CI Docker image; for kernel work only the kernel steps below matter.
+
 ## 2. Build
 
 Everything below in the MSYS2 shell, from the repo root. `git` must be on PATH (the kernel
@@ -97,17 +132,22 @@ make -C kernelboot
 make -C fatfs -f Makefile.ppc
 make -C loader/source/ppc
 make -C loader LIBOGC_INC=/c/devkitPro/legacy/libogc/include \
-               LIBOGC_LIB=/c/devkitPro/legacy/libogc/lib/wii
+               LIBOGC_LIB=/c/devkitPro/legacy/libogc/lib/wii \
+               MACHDEP="-DGEKKO -mrvl -mcpu=750 -meabi -mhard-float -B/c/devkitPro/legacy/crtls/lib/"
                                      # -> loader/loader.dol and nintendont/boot.dol
 ```
+
+If `loader/build/` holds objects from an earlier attempt against the pacman libogc, `rm -rf
+loader/build` first: stale objects compiled against libogc 3 headers fail to link (`PPCDCache*`).
 
 Why not the root `make`: its `bin2h` target runs `make -C kernel/bin2h`, whose Makefile only
 knows Linux/macOS (`kernel/bin2h/Makefile:10-29`) and errors on Windows; the tracked
 `kernel/bin2h/bin2h.exe` is used directly by the kernel Makefile (`kernel/Makefile:68-69`).
 Everything else is exactly the root Makefile's subproject order (`Makefile:14-17`).
 
-`LIBOGC_INC`/`LIBOGC_LIB` on the loader command line override the `export ... :=` in
-`$(DEVKITPPC)/wii_rules` (command-line variables beat makefile assignments).
+`LIBOGC_INC`/`LIBOGC_LIB`/`MACHDEP` on the loader command line override the assignments in
+`$(DEVKITPPC)/wii_rules` (command-line variables beat makefile assignments); `-B` makes gcc
+resolve `rvl.ld%s` and `crtmain.o%s` from the legacy directory first.
 
 ## 3. Warnings baseline (GCC 16.1.0, kernel)
 
@@ -117,6 +157,9 @@ for line moves: `Patch.c:164` (`*(u8*)0x00000007`, `-Warray-bounds`), `Patch.c:9
 the log. `RelayEXI.c`, `EXI.c`, `main.c` compile clean with the kernel's `-Wall`.
 
 ## 4. Output
+
+Built 2026-09-22 on branch `reporter`: kernel 474,324 bytes, `loader.dol` 1,580,384 bytes,
+`loader/data/kernel.zip` regenerated before the loader step so the loader embeds the new kernel.
 
 - `kernel/kernel.bin`: the ARM kernel; `loader/data/kernel.zip` is what the loader embeds.
 - `nintendont/boot.dol` (copy of `loader/loader.dol`): put it at
