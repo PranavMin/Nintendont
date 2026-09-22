@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "debug.h"
 #include "SRAM.h"
 #include "SlippiMemory.h"
+#include "RelayEXI.h"
 
 #include "ff_utf8.h"
 
@@ -733,7 +734,14 @@ void EXIUpdateRegistersNEW( void )
 
 #ifdef GCNCARD_ENABLE_SLOT_B
 						case EXI_DEV_MEMCARD_B:
-							ret = GCNCard_IsEnabled(1);
+							// Slot B also hosts the tournament relay device (RelayEXI.c).
+							// The game selects it with no card image loaded and bails if
+							// EXISelect returns 0 (melee lbrelayexi.c:66), so answer 1.
+							// Melee's CARD library only selects slot B after EXIProbe
+							// (asm/EXIProbe.S), which stays 0 without NIN_CFG_MC_SLOTB,
+							// so without a card image only the relay driver sees this.
+							RelayEXISelect();
+							ret = 1;
 							break;
 #endif /* GCNCARD_ENABLE_SLOT_B */
 
@@ -771,6 +779,15 @@ void EXIUpdateRegistersNEW( void )
 						break;
 
 					case EXI_DEV_MEMCARD_B:
+						if (RelayEXIImmWrite(data, len, mode))
+						{
+							// Relay command word / request bytes (RelayEXI.c). Ack the
+							// transfer ourselves, as EXIDeviceMemoryCard does at the end
+							// (lines 403-404); immediate writes raise no IRQ.
+							write32( EXI_CMD_0, 0 );
+							sync_after_write( (void*)EXI_BASE, 0x20 );
+							break;
+						}
 						EXIDeviceMemoryCard(1, (u8*)data, len, mode);
 						break;
 
@@ -837,6 +854,14 @@ void EXIUpdateRegistersNEW( void )
 
 #ifdef GCNCARD_ENABLE_SLOT_B
 					case EXI_DEV_MEMCARD_B:
+
+						if (mode == 0)
+						{
+							// The only slot-B DMA read is the relay poll (melee
+							// lbrelayexi.c:110): RelayEXI fills the game's buffer when an
+							// EXI_RELAY_POLL word preceded it, then the usual ack below.
+							RelayEXIDMARead(ptr, len);
+						}
 
 						if (!slippi_use_port_a && mode == 1) {
 							// Write data received by DMA to SlippiMemory

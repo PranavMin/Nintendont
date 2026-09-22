@@ -41,6 +41,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "SlippiFileWriter.h"
 #include "SlippiNetwork.h"
 #include "SlippiNetworkBroadcast.h"
+#include "RelayEXI.h"
 #include "net.h"
 
 #include "../common/include/KernelBoot.h"
@@ -323,6 +324,10 @@ int _main( int argc, char *argv[] )
 #endif
 		SlippiNetworkBroadcastInit();
 	}
+
+	// Tournament relay EXI device (RelayEXI.c): read sd:/tournament.cfg and
+	// spawn the relay thread. Whether networking came up is checked per request.
+	RelayEXIInit();
 
 /* CONFIG_INIT BOOT STAGE
  * Double check that we've read a copy of the Nintendont config into memory
