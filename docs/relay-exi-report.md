@@ -141,9 +141,33 @@ not enabled (`NIN_CFG_NETWORK` off, `kernel/main.c:315-326`). The game shows the
 `kernel/Config.c:13-39`: FatFS open + `f_read` once at boot) with the SD path spelled out like the
 loader's nickname read (`SD_SLIPPI_DAT_FILE`, `common/include/Slippi.h:13`) and without the
 `Shutdown()` on failure. Format (design 4.3): `key=value` lines, `\r\n` tolerated, unknown keys
-ignored, all four of `relay_ip` (dotted quad), `relay_port` (1-65535), `station` (0-65535) and
-`stream` (0 or 1) required. Missing file, file >= 512 bytes, or any key missing/invalid ->
-`cfg.ok = false`.
+ignored, both of `station` (0-65535) and `stream` (0 or 1) required. Missing file, file >= 512
+bytes, or either key missing/invalid -> `cfg.ok = false`. Since 2026-09-25 (design R15) the card
+has no relay address: `relay_ip`/`relay_port` from older cards are unknown keys and ignored.
+
+### 3.7 Relay discovery (design R15)
+
+The relay broadcasts a 12-byte `relay_beacon` (`relay_proto.h`) every `BEACON_INTERVAL_MS` to UDP
+`BEACON_PORT`. The relay thread, whenever it is idle (`RelayEXIThread`, the `relay_state !=
+RELAY_BUSY` branch), calls `serviceBeacon()`: once `NetworkStarted` it creates a UDP socket
+bound to `BEACON_PORT` on any address and sets it non-blocking with the same `IOCTL_SO_FCNTL` as the
+TCP connect (`beaconSetup()`; a failed socket/bind is logged and tried again after 1 s); then every
+100 ms it drains up to 8 datagrams. One counts only if it is exactly `sizeof(struct
+relay_beacon)` bytes with magic `MT`, `RELAY_PROTO_VERSION` and a non-zero `tcp_port`; its
+**source address** and `tcp_port` become `relay_ip`/`relay_port`, the latest one winning, and a
+change logs `RelayEXI: relay is a.b.c.d:port (event N)`.
+
+`kernel/net.c:263` `recvfrom()` cannot report the source address (its third vector is NULL,
+net.c:278-279), so `RelayEXI.c` has its own `recvfromAddr()` with libogc's vector layout for
+`IOCTLV_SO_RECVFROM` (`network_wii.c` `net_recvfrom`: one input vector {socket, flags}, two
+outputs {data, source sockaddr}). **Unverified on hardware** (2026-09-25): the layout is libogc's,
+the kernel builds clean, but no Wii has received a beacon yet. If `relay_ip` stays 0 on
+hardware while the relay's status page shows the beacon going out, this call is the first
+suspect.
+
+Until a beacon is heard, `exi_poll_hdr.relay_ip`/`relay_port` are 0 and every request answers
+`ST_INTERNAL` `"no relay found yet"` without touching the network. Each round trip snapshots
+the address once (`doRoundTrip`), so a relay that moves mid-request is used from the next one.
 
 Note: the kernel mounts `sd:` only when the game boots from SD or Slippi replays are enabled
 (`kernel/main.c:197-198,238-249`). Booting the ISO from USB with replays off leaves `sd:`
@@ -230,13 +254,12 @@ Nothing in this session ran on a Wii. Open points to verify, in order:
 `sd:/tournament.cfg` in the root of the SD card the game boots from, one per Wii:
 
 ```
-relay_ip=192.168.1.10
-relay_port=7777
 station=3
 stream=1
 ```
 
-- `relay_ip`/`relay_port`: the relay on the Pi (design section 10: wired, static IP).
+- No relay address: the Wii finds the relay from its UDP beacon (section 3.7, design R15).
+  The Wii and the Pi must be on the same network, and it must not isolate clients.
 - `station`: the physical station number on the label; stamped into every request.
 - `stream`: `1` on **exactly one** Wii, the stream station, `0` everywhere else. The relay refuses
   `START_SET` with `stream=1` from any station other than its configured stream station

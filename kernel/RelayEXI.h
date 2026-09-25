@@ -16,9 +16,10 @@
 
 #include "global.h"
 
-/* Read sd:/tournament.cfg and spawn the relay thread. Call once at boot after
- * the SD card is mounted; networking may or may not be up (checked per
- * request). */
+/* Read sd:/tournament.cfg (station, stream) and spawn the relay thread. Call
+ * once at boot after the SD card is mounted; networking may or may not be up.
+ * The thread finds the relay itself: once the network is up it listens for
+ * the relay's UDP beacon (design R15) and uses the latest one's address. */
 void RelayEXIInit(void);
 
 /* EXISelect on the relay's channel: forget any half-received transaction. */
@@ -32,8 +33,9 @@ void RelayEXISelect(void);
 bool RelayEXIImmWrite(u32 data, u32 len, u32 mode);
 
 /* EXIDMA read on the relay's channel (main loop). If an EXI_RELAY_POLL command
- * word preceded it, fills the game's buffer with {state u8, pad[3], response}
- * (lbRelayExi_PollBuf layout) and syncs it; returns true in that case. */
+ * word preceded it, fills the game's buffer with {exi_poll_hdr, response}
+ * (lbRelayExi_PollBuf layout; relay_ip/relay_port 0 until a beacon is heard)
+ * and syncs it; returns true in that case. */
 bool RelayEXIDMARead(u8 *ptr, u32 len);
 
 #endif /* __RELAY_EXI_H__ */

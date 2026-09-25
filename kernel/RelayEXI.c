@@ -24,6 +24,15 @@
  *   RELAY_IDLE  --REQ complete-->  RELAY_BUSY  --thread-->  RELAY_DONE
  *                                              \--thread-->  RELAY_ERROR
  *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped.
+ *
+ * Relay discovery (../tournament-reporter/docs/design.md R15, protocol.yaml
+ * relay_beacon): tournament.cfg carries no relay address. The relay
+ * broadcasts a 12-byte relay_beacon every BEACON_INTERVAL_MS to UDP
+ * BEACON_PORT; the same thread, while idle, owns a non-blocking UDP socket
+ * bound to that port and takes the latest valid beacon's SOURCE address plus
+ * its tcp_port as the relay (relay_ip / relay_port below). Until one arrives
+ * both are 0: exi_poll_hdr shows 0 and every request answers ST_INTERNAL
+ * "no relay found yet".
  */
 
 #include "RelayEXI.h"
@@ -49,6 +58,9 @@
 #define RELAY_CFG_PATH		"sd:/tournament.cfg"	/* design 4.3 */
 #define RELAY_CFG_MAX		512
 #define RELAY_RX_CHUNK		1024
+#define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
+#define RELAY_BEACON_SETUP_MS	1000	/* socket/bind failed or network not up yet: try again this often */
+#define RELAY_BEACON_DRAIN_MAX	8	/* datagrams read per poll; beacons come every 2 s */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
  * net_fcntl(): params = {socket, cmd, flags}, ioctl input length 12, no
@@ -77,14 +89,22 @@ static u32 RelayEXIThread(void *arg);
 
 /* sd:/tournament.cfg */
 struct RelayCfg {
-	u32	ip;		/* relay_ip, host order (kernel is big-endian, same as wire) */
-	u16	port;		/* relay_port */
 	u16	station;	/* station */
 	u8	stream;		/* stream (0/1) */
 	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no tournament.cfg" */
 };
 static struct RelayCfg cfg;
 static char cfg_text[RELAY_CFG_MAX] ALIGNED(32);
+
+/* The relay as the latest valid relay_beacon announced it; 0 = none heard
+ * yet. Written only by the relay thread (serviceBeacon); read by the thread
+ * for the next round trip and by the poll path (main loop) for
+ * exi_poll_hdr. Host order = wire order (the kernel is big-endian). */
+static vu32 relay_ip = 0;
+static vu32 relay_port = 0;
+static s32 beacon_sock = -1;		/* UDP socket bound to BEACON_PORT, -1 until set up */
+static u32 beacon_ts = 0;		/* HW_TIMER of the last setup attempt or drain */
+static u8 beacon_rx[32] ALIGNED(32);	/* recvfrom target; > sizeof(relay_beacon) so oversize datagrams show */
 
 /* EXI transaction being received on the main loop (reset by RelayEXISelect) */
 static u8 exi_cmd = 0;			/* EXI_RELAY_REQ / EXI_RELAY_POLL / 0 */
@@ -128,53 +148,20 @@ static bool parseU32(const char *s, u32 max, u32 *out)
 	return *s == 0;
 }
 
-/* Dotted quad -> u32. */
-static bool parseIp(const char *s, u32 *out)
-{
-	u32 ip = 0;
-	int part;
-	for (part = 0; part < 4; part++)
-	{
-		u32 v = 0;
-		u32 n = 0;
-		while (*s >= '0' && *s <= '9')
-		{
-			v = v * 10 + (u32)(*s - '0');
-			if (v > 255)
-				return false;
-			s++;
-			n++;
-		}
-		if (n == 0)
-			return false;
-		ip = (ip << 8) | v;
-		if (part < 3)
-		{
-			if (*s != '.')
-				return false;
-			s++;
-		}
-	}
-	while (*s == ' ' || *s == '\t' || *s == '\r')
-		s++;
-	if (*s != 0)
-		return false;
-	*out = ip;
-	return true;
-}
-
-/* key=value lines, keys relay_ip / relay_port / station / stream (design 4.3),
- * all four required, unknown keys ignored, blank lines ignored. */
+/* key=value lines, keys station / stream (design 4.3), both required, unknown
+ * keys ignored, blank lines ignored. relay_ip / relay_port from cards written
+ * before relay discovery (design R15) are unknown keys now: ignored, the
+ * relay's address comes from its beacon. */
 static bool parseCfg(char *text)
 {
-	bool have_ip = false, have_port = false, have_station = false, have_stream = false;
+	bool have_station = false, have_stream = false;
 	char *line = text;
 
 	while (*line)
 	{
 		char *next = strchr(line, '\n');
 		char *eq;
-		u32 v;
+		u32 v = 0;	/* parseU32 leaves it untouched on failure */
 		if (next)
 			*next++ = 0;
 		else
@@ -185,14 +172,7 @@ static bool parseCfg(char *text)
 		{
 			const char *val = eq + 1;
 			*eq = 0;
-			if (strcmp(line, "relay_ip") == 0)
-				have_ip = parseIp(val, &cfg.ip);
-			else if (strcmp(line, "relay_port") == 0)
-			{
-				have_port = parseU32(val, 65535, &v) && v != 0;
-				cfg.port = (u16)v;
-			}
-			else if (strcmp(line, "station") == 0)
+			if (strcmp(line, "station") == 0)
 			{
 				have_station = parseU32(val, 65535, &v);
 				cfg.station = (u16)v;
@@ -205,7 +185,7 @@ static bool parseCfg(char *text)
 		}
 		line = next;
 	}
-	return have_ip && have_port && have_station && have_stream;
+	return have_station && have_stream;
 }
 
 /* Pattern B from the investigation (kernel/Config.c ConfigInit: FatFS open +
@@ -234,9 +214,8 @@ static void loadCfg(void)
 
 	cfg.ok = parseCfg(cfg_text);
 	if (cfg.ok)
-		dbgprintf("RelayEXI: relay %u.%u.%u.%u:%u station %u stream %u\r\n",
-			cfg.ip >> 24, (cfg.ip >> 16) & 0xFF, (cfg.ip >> 8) & 0xFF, cfg.ip & 0xFF,
-			cfg.port, cfg.station, cfg.stream);
+		dbgprintf("RelayEXI: station %u stream %u (relay address from its beacon, udp %u)\r\n",
+			cfg.station, cfg.stream, BEACON_PORT);
 	else
 		dbgprintf("RelayEXI: %s malformed\r\n", RELAY_CFG_PATH);
 }
@@ -338,8 +317,8 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 		struct exi_poll_hdr *ph = (struct exi_poll_hdr *)poll_image;
 		ph->state = (u8)relay_state;
 		ph->station = cfg.station;
-		ph->relay_ip = cfg.ip;
-		ph->relay_port = cfg.port;
+		ph->relay_ip = relay_ip;		/* 0 until a beacon is heard */
+		ph->relay_port = (u16)relay_port;
 	}
 	else
 		poll_image[0] = (u8)relay_state;
@@ -382,6 +361,108 @@ static s32 relay_fcntl(s32 sock, u32 cmd, u32 flags)
 	return IOS_Ioctl(top_fd, IOCTL_SO_FCNTL, params, 12, NULL, 0);
 }
 
+/* recvfrom that also returns the sender's address, which kernel/net.c:263
+ * recvfrom does not (it passes a NULL third vector, net.c:278-279). Vector
+ * layout from libogc network_wii.c net_recvfrom: one input vector (socket,
+ * flags) and two outputs (data, source sockaddr). `mem` and `from` must be
+ * 32-byte aligned. */
+static s32 recvfromAddr(s32 sock, void *mem, s32 len, struct sockaddr_in *from)
+{
+	STACK_ALIGN(u32, params, 2, 32);
+	STACK_ALIGN(ioctlv, vec, 3, 32);
+
+	params[0] = (u32)sock;
+	params[1] = 0;
+	vec[0].data = params;
+	vec[0].len = 8;
+	vec[1].data = mem;
+	vec[1].len = len;
+	vec[2].data = from;
+	vec[2].len = 8;
+	return IOS_Ioctlv(top_fd, IOCTLV_SO_RECVFROM, 1, 2, vec);
+}
+
+/* UDP socket on BEACON_PORT, any address, non-blocking (same FCNTL as the TCP
+ * connect, relay_fcntl below). On failure beacon_sock stays -1 and
+ * serviceBeacon tries again after RELAY_BEACON_SETUP_MS. */
+static s32 relay_fcntl(s32 sock, u32 cmd, u32 flags);
+static void beaconSetup(void)
+{
+	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
+	s32 sock, res, flags;
+
+	sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
+	if (sock < 0)
+	{
+		dbgprintf("RelayEXI: beacon socket failed (%d)\r\n", sock);
+		return;
+	}
+	memset(addr, 0, sizeof(*addr));
+	addr->sin_family = AF_INET;
+	addr->sin_port = BEACON_PORT;
+	addr->sin_addr.s_addr = INADDR_ANY;
+	res = bind(top_fd, sock, (struct sockaddr *)addr);
+	if (res < 0)
+	{
+		dbgprintf("RelayEXI: beacon bind udp %u failed (%d)\r\n", BEACON_PORT, res);
+		close(top_fd, sock);
+		return;
+	}
+	flags = relay_fcntl(sock, RELAY_F_GETFL, 0);
+	if (flags < 0)
+		flags = 0;
+	relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
+	beacon_sock = sock;
+	dbgprintf("RelayEXI: listening for relay beacons on udp %u\r\n", BEACON_PORT);
+}
+
+/* Idle-thread duty: set the socket up once the network is, then every
+ * RELAY_BEACON_POLL_MS read what arrived. A datagram counts only if it is
+ * exactly one relay_beacon with our magic, version and a non-zero port; the
+ * latest one wins, so a relay that moves (new DHCP lease) is followed. */
+static void serviceBeacon(void)
+{
+	STACK_ALIGN(struct sockaddr_in, from, 1, 32);
+	const struct relay_beacon *b = (const struct relay_beacon *)beacon_rx;
+	u32 n;
+
+	if (!NetworkStarted)
+		return;
+	if (TimerDiffMs(beacon_ts) < (beacon_sock < 0 ? RELAY_BEACON_SETUP_MS : RELAY_BEACON_POLL_MS))
+		return;
+	beacon_ts = read32(HW_TIMER);
+	if (beacon_sock < 0)
+	{
+		beaconSetup();
+		return;
+	}
+
+	for (n = 0; n < RELAY_BEACON_DRAIN_MAX; n++)
+	{
+		s32 res;
+		memset(from, 0, sizeof(*from));
+		from->sin_len = 8;
+		from->sin_family = AF_INET;
+		res = recvfromAddr(beacon_sock, beacon_rx, sizeof(beacon_rx), from);
+		if (res < 0)
+			break;	/* -EAGAIN: nothing more queued */
+		if (res != (s32)sizeof(struct relay_beacon) ||
+		    b->magic[0] != RELAY_MAGIC_0 || b->magic[1] != RELAY_MAGIC_1 ||
+		    b->version != RELAY_PROTO_VERSION || b->tcp_port == 0 ||
+		    from->sin_addr.s_addr == 0)
+			continue;
+		if (from->sin_addr.s_addr != relay_ip || b->tcp_port != relay_port)
+		{
+			u32 ip = from->sin_addr.s_addr;
+			dbgprintf("RelayEXI: relay is %u.%u.%u.%u:%u (event %u)\r\n",
+				ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+				b->tcp_port, b->event_id);
+			relay_port = b->tcp_port;
+			relay_ip = ip;
+		}
+	}
+}
+
 static u32 remainingMs(u32 start)
 {
 	u32 elapsed = TimerDiffMs(start);
@@ -399,6 +480,10 @@ static const char *doRoundTrip(u32 start)
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
 	const char *fail = NULL;
 	s32 sock, res, flags;
+	/* One snapshot per round trip: a beacon that moves the relay mid-request
+	 * takes effect on the next request. */
+	const u32 ip = relay_ip;
+	const u16 port = (u16)relay_port;
 
 	sock = socket(top_fd, AF_INET, SOCK_STREAM, IPPROTO_IP);
 	if (sock < 0)
@@ -413,8 +498,8 @@ static const char *doRoundTrip(u32 start)
 
 	memset(addr, 0, sizeof(*addr));
 	addr->sin_family = AF_INET;
-	addr->sin_port = cfg.port;
-	addr->sin_addr.s_addr = cfg.ip;
+	addr->sin_port = port;
+	addr->sin_addr.s_addr = ip;
 	res = connect(top_fd, sock, (struct sockaddr *)addr);
 	if (res < 0 && res != -RELAY_SO_EINPROGRESS && res != -RELAY_SO_EAGAIN && res != -RELAY_SO_EALREADY)
 		fail = "connect";
@@ -497,6 +582,7 @@ static u32 RelayEXIThread(void *arg)
 
 		if (relay_state != RELAY_BUSY)
 		{
+			serviceBeacon();
 			mdelay(RELAY_THREAD_CYCLE_MS);
 			continue;
 		}
@@ -518,6 +604,11 @@ static u32 RelayEXIThread(void *arg)
 		else if (!NetworkStarted)
 		{
 			synthResponse("no network");
+			fail = NULL;
+		}
+		else if (relay_ip == 0)
+		{
+			synthResponse("no relay found yet");
 			fail = NULL;
 		}
 		else
