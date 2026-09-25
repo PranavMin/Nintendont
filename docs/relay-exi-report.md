@@ -149,9 +149,19 @@ Note: the kernel mounts `sd:` only when the game boots from SD or Slippi replays
 (`kernel/main.c:197-198,238-249`). Booting the ISO from USB with replays off leaves `sd:`
 unmounted and every relay command answers `"no tournament.cfg"`.
 
-## 4. Version-gate bypass (design R12)
+## 4. Version-gate bypass (design R12) - SUPERSEDED 2026-09-24
 
-**Problem.** `GetMeleeVersion()` (`kernel/Patch.c:160`) keyed only on the disc header
+**Superseded.** The kiosk no longer ships a shifted DOL: the ISO is stock 1.02 and the kiosk
+code is `sd:/tournament.bin`, loaded by `LoadTournamentModule()` in `kernel/Patch.c` inside the
+same full-DOL patch pass, after the GCT/Slippi-core block and before `PatchState =
+PATCH_STATE_DONE`, only when `MeleeVersion == MELEE_VERSION_NTSC_2`. It checks the `TMOD`
+header, the guard word (`0x8016D800 == 0x7C0802A6`) and that `*(0x80000034)` (arenaHi) is
+still above the load address, reads the blob to MEM1, applies the patch words and writes the
+load address to `0x80000034`. A missing file logs one line and changes nothing. The
+`254853c` gate below is reverted; Slippi core, MeleeCodes and hotswap apply as stock. The
+section is kept for the history of the shifted-DOL era.
+
+**Problem (historical).** `GetMeleeVersion()` (`kernel/Patch.c:160`) keyed only on the disc header
 (`GAME_ID`, byte 7), and the tournament ISO keeps a vanilla GALE01 v1.02 header, so Nintendont
 detected `MELEE_VERSION_NTSC_2` and would have written the Slippi core codeset, the toggled
 MeleeCodes, the tournament-mode redirect `write32(0x0022D638, ...)` and the codehandler at
@@ -202,9 +212,10 @@ Nothing in this session ran on a Wii. Open points to verify, in order:
    log shows `ERROR (connect) after 0 ms`. Also measure the unreachable-relay case: the log must
    show `ERROR (connect timeout) after ~3000 ms`, not a multi-second stall.
 3. **Round-trip time** under 500 ms per session 8's done-when.
-4. **Version gate.** Boot log line `Patch:Tournament build (DOL at 0x57058000), skipping Melee
-   patches` (needs `DEBUG_PATCH`, on by default in `kernel/global.h:27`) and no `Patch:Apply Slippi
-   core` line; the game reaches the set list instead of crashing at boot.
+4. **Module load.** Boot log shows `Patch:Apply Slippi core` *and* the tournament-module line
+   with its load address (needs `DEBUG_PATCH`, on by default in `kernel/global.h:27`); the game
+   reaches the set list, and a game writes a `.slp` to the USB drive. Unplug/replug the USB drive
+   between games: the next game still records (hotswap untouched).
 5. **Slot-B EXISelect answering 1** does not disturb anything else in this build (no card image in
    slot B at the venue).
 6. `EXI_RELAY_POLL` = 0xF1 collides with the memory-card *erase* command byte in Nintendont's
