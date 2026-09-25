@@ -138,21 +138,6 @@ static const char TITLE_20XX[] = "Super Smash Bros Melee 20XX";
 #define MELEE_VERSION_NTSC_2		3
 #define MELEE_VERSION_TM		6
 
-/* Tournament build detection (tournament-reporter design.md R12).
- *
- * SmashTournament-*.iso keeps a vanilla GALE01 v1.02 disc header (required to
- * boot) but appends a shifted decomp DOL past end-of-data and repoints the
- * header's DOL offset (0x420) at it: 0x57058000 in v24, versus 0x1E800 for the
- * stock DOL, which sits in the sys area below the FST at 0x456E00. Every venue
- * mod (UCF, neutral spawns, striking, audio, rumble toggle, defaults) is
- * compiled into that DOL, so none of the vanilla-addressed Melee patches or
- * MeleeCodes may be applied to it. DOLDiscOffset is captured in DoPatches()
- * from the DiscOffset of the DOL header read (the apploader reads the 0x100
- * byte header from the disc's DOL offset); a stock 1.02 disc can never place
- * its DOL 16 MiB into the image, so this cannot false-positive on one. */
-#define TOURNAMENT_DOL_MIN_OFFSET	0x01000000
-static u32 DOLDiscOffset = 0;
-
 /* GetMeleeVersion()
  * Returns non-zero if the title we're booting supports Slippi recording AND 
  * the supports the various toggleable Gecko codes.
@@ -166,15 +151,6 @@ static u32 GetMeleeVersion(void)
 	// This is the only way to check for a 20XX image; not supported!
 	if (strncmp(GAME_TITLENAME, TITLE_20XX, sizeof(TITLE_20XX)) == 0)
 		return MELEE_VERSION_20XX;
-
-	// Tournament build: vanilla header, appended DOL. Not supported by the
-	// Slippi/Gecko patch set (see TOURNAMENT_DOL_MIN_OFFSET above); the relay
-	// EXI device (RelayEXI.c) is independent of this and stays active.
-	if (DOLDiscOffset >= TOURNAMENT_DOL_MIN_OFFSET)
-	{
-		dbgprintf("Patch:Tournament build (DOL at 0x%08X), skipping Melee patches\r\n", DOLDiscOffset);
-		return MELEE_VERSION_NONE;
-	}
 
 	switch(GAME_ID)
 	{
@@ -1262,10 +1238,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	// Load melee code config
 	const MeleeCodeConfig *codeConfig = GetMeleeCodeConfig();
 	u32 screenValue = ConfigGetMeleeCodeValue(codeConfig->items[MELEE_CODES_SCREEN_OPTION_ID]->identifier);
-	// Melee version once per pass; 0 for the tournament build (see GetMeleeVersion).
-	u32 MeleeVersion = GetMeleeVersion();
-	// Widescreen is a MeleeCodes option: only meaningful when the Melee codeset applies.
-	u8 isMeleeWidescreen = MeleeVersion && (screenValue == MELEE_CODES_WIDE_VALUE || screenValue == MELEE_CODES_WIDE_SHUTTERS_VALUE);
+	u8 isMeleeWidescreen = screenValue == MELEE_CODES_WIDE_VALUE || screenValue == MELEE_CODES_WIDE_SHUTTERS_VALUE;
 
 	// PSO 1&2 / III
 	u32 isPSO = 0;
@@ -1353,7 +1326,6 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			if( read32( (u32)Buffer ) == 0x100 && (((dolhdr*)Buffer)->entrypoint & 0xFE000000) == 0x80000000 )
 			{
 				ELFLoading = 0;
-				DOLDiscOffset = DiscOffset;	// where on the disc this DOL lives (tournament build detection)
 				//quickly calc the size
 				DOLSize = sizeof(dolhdr);
 				dolhdr *dol = (dolhdr*)Buffer;
@@ -1706,6 +1678,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		FPATCH_OSSleepThread | FPATCH_GXBegin | FPATCH_GXDrawDone;
 #ifdef CHEATS
 	u32 cheatsWanted = 0, debuggerWanted = 0;
+	u32 MeleeVersion = GetMeleeVersion();
 
 	if(ConfigGetConfig(NIN_CFG_CHEATS))
 		cheatsWanted = 1;
