@@ -1222,6 +1222,101 @@ static bool fileExist(const char *path)
 	return false;
 }
 
+/* Tournament module (tournament-reporter design.md, vanilla-ISO architecture).
+ * sd:/tournament.bin is the kiosk's code (melee tools/build_module.py), linked
+ * at a fixed address against the stock GALE01 v1.02 symbol map:
+ *   "TMOD" u32 version=1 u32 load_addr u32 blob_len u32 n_patches
+ *   u32 guard_addr u32 guard_word, n_patches x {u32 addr, u32 value}, blob
+ * Applied here, in the full-DOL patch pass, once the apploader has placed the
+ * whole DOL and the arena-top word (0x34) but before the PPC runs it: verify
+ * the guard (a vanilla instruction), copy the blob to load_addr (above the
+ * arena top the game adopts), apply the patch words, lower 0x34 to load_addr
+ * so the heap stops below the module. The Slippi core / MeleeCodes / codehandler
+ * are applied to the same vanilla DOL exactly as without the module; the
+ * builder refuses hook addresses those codesets touch. Missing file: plain
+ * Melee, one log line. Any other problem: logged, nothing written. The
+ * Ishiiruka fork does the same for Dolphin. */
+#define TMOD_PATH "sd:/tournament.bin"
+#define TMOD_HDR 28
+#define TMOD_MAX_LEN 0x80000
+#define TMOD_MAX_PATCHES 256
+
+static u32 tmodBE32(const u8 *p)
+{
+	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+static void LoadTournamentModule(void)
+{
+	FIL fp;
+	UINT rd = 0;
+	u8 hdr[TMOD_HDR];
+	u32 version, load, len, n, gaddr, gword, arena_hi, i;
+	u8 *patches;
+
+	if (f_open_char(&fp, TMOD_PATH, FA_READ | FA_OPEN_EXISTING) != FR_OK)
+	{
+		dbgprintf("TMOD:%s not found, plain Melee\r\n", TMOD_PATH);
+		return;
+	}
+	if (fp.obj.objsize < TMOD_HDR || f_read(&fp, hdr, TMOD_HDR, &rd) != FR_OK || rd != TMOD_HDR
+		|| memcmp(hdr, "TMOD", 4) != 0)
+	{
+		dbgprintf("TMOD:%s is not a TMOD file\r\n", TMOD_PATH);
+		f_close(&fp);
+		return;
+	}
+	version = tmodBE32(hdr + 4);
+	load = tmodBE32(hdr + 8);
+	len = tmodBE32(hdr + 12);
+	n = tmodBE32(hdr + 16);
+	gaddr = tmodBE32(hdr + 20);
+	gword = tmodBE32(hdr + 24);
+	if (version != 1 || len > TMOD_MAX_LEN || n > TMOD_MAX_PATCHES
+		|| fp.obj.objsize != TMOD_HDR + n * 8 + len || (load & 0x8000001F) != 0x80000000)
+	{
+		dbgprintf("TMOD:bad header (v%u load %08x len %u patches %u)\r\n", version, load, len, n);
+		f_close(&fp);
+		return;
+	}
+	if (read32(P2C(gaddr)) != gword)
+	{
+		dbgprintf("TMOD:guard %08x != %08x at %08x - not stock Melee 1.02, not loaded\r\n",
+			read32(P2C(gaddr)), gword, gaddr);
+		f_close(&fp);
+		return;
+	}
+	arena_hi = read32(0x34);
+	if (arena_hi < load + len)
+	{
+		dbgprintf("TMOD:arena top %08x below module end %08x\r\n", arena_hi, load + len);
+		f_close(&fp);
+		return;
+	}
+	patches = malloc(n * 8 + 8);
+	if (f_read(&fp, patches, n * 8, &rd) != FR_OK || rd != n * 8
+		|| f_read(&fp, (void*)P2C(load), len, &rd) != FR_OK || rd != len)
+	{
+		dbgprintf("TMOD:read failed\r\n");
+		free(patches);
+		f_close(&fp);
+		return;
+	}
+	f_close(&fp);
+	sync_after_write((void*)P2C(load), len);
+	for (i = 0; i < n; i++)
+	{
+		u32 addr = tmodBE32(patches + i * 8);
+		u32 val = tmodBE32(patches + i * 8 + 4);
+		write32(P2C(addr), val);
+	}
+	free(patches);
+	write32(0x34, load);
+	sync_after_write((void*)0x0, 0x40);
+	dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x\r\n",
+		len, load, n, arena_hi, load);
+}
+
 void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 {
 	if( (u32)Buffer == 0x01200000 && *(u8*)Buffer == 0x7C )
@@ -3510,6 +3605,10 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		}
 	}
 	#endif
+	/* Tournament module: after every other patch, Melee 1.02 only. */
+	if (MeleeVersion == MELEE_VERSION_NTSC_2)
+		LoadTournamentModule();
+
 	PatchState = PATCH_STATE_DONE;
 
 	//Sonic R NTSC Old Debug Prints
