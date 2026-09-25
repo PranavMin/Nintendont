@@ -10,7 +10,7 @@
  *         EXIImm stub (kernel/asm/EXIImm.S:36-41) stores the bytes as an
  *         immediate word, first byte in the top bits;
  *   POLL: one 4096-byte EXIDma read (lbrelayexi.c:110) that must come back
- *         as lbRelayExi_PollBuf: {state u8, pad[3], relay_hdr, relay_resp,
+ *         as lbRelayExi_PollBuf: {exi_poll_hdr, relay_hdr, relay_resp,
  *         payload}.
  *
  * Contexts (investigation section 1/3): EXI writes are serviced by the kernel
@@ -42,7 +42,7 @@
 #define RELAY_EXI_BUF_SIZE	4096	/* LB_RELAY_EXI_BUF_SIZE */
 #define RELAY_EXI_MAX_PAYLOAD	28	/* LB_RELAY_EXI_MAX_PAYLOAD */
 #define RELAY_REQ_MAX		(sizeof(struct relay_hdr) + RELAY_EXI_MAX_PAYLOAD)
-#define RELAY_RESP_MAX		(RELAY_EXI_BUF_SIZE - 4)	/* after the state word */
+#define RELAY_RESP_MAX		(RELAY_EXI_BUF_SIZE - sizeof(struct exi_poll_hdr))	/* after the poll header */
 
 #define RELAY_BUDGET_MS		3000	/* design 4.6: one attempt, 3 s */
 #define RELAY_THREAD_CYCLE_MS	1	/* like SlippiNetwork.c THREAD_CYCLE_TIME_MS */
@@ -330,13 +330,25 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 	 * 32-bit MEM1 writes, kernel/common.h:36-42; same shape as
 	 * EXIReadFontFile, kernel/EXI.c:903-907). Zero buffer unless DONE. */
 	memset(poll_image, 0, len);
-	poll_image[0] = (u8)relay_state;
-	if (relay_state == RELAY_DONE && len > 4)
+	/* exi_poll_hdr (protocol.yaml): state plus where this station is, so the
+	 * game can print STATION n / RELAY a.b.c.d even while the relay is down.
+	 * The kernel is big-endian like the wire, so the struct is written as is. */
+	if (len >= sizeof(struct exi_poll_hdr))
+	{
+		struct exi_poll_hdr *ph = (struct exi_poll_hdr *)poll_image;
+		ph->state = (u8)relay_state;
+		ph->station = cfg.station;
+		ph->relay_ip = cfg.ip;
+		ph->relay_port = cfg.port;
+	}
+	else
+		poll_image[0] = (u8)relay_state;
+	if (relay_state == RELAY_DONE && len > sizeof(struct exi_poll_hdr))
 	{
 		u32 n = resp_len;
-		if (n > len - 4)
-			n = len - 4;
-		memcpy(poll_image + 4, resp_buf, n);
+		if (n > len - sizeof(struct exi_poll_hdr))
+			n = len - sizeof(struct exi_poll_hdr);
+		memcpy(poll_image + sizeof(struct exi_poll_hdr), resp_buf, n);
 	}
 	memcpy(ptr, poll_image, len);
 	sync_after_write(ptr, len);
