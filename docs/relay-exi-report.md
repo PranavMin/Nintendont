@@ -256,8 +256,13 @@ Nothing in this session ran on a Wii. Open points to verify, in order:
 ```
 station=3
 stream=1
+secret=<the relay's RELAY_SECRET>
 ```
 
+- `secret`: the relay's shared secret (design R16), the same on every card; 8-16 of `A-Z a-z 0-9 - _`.
+  Sent as a `relay_auth` block ahead of every request (`doRoundTrip`). Missing or malformed: every
+  action shows `no secret in tournament.cfg` without touching the network; wrong: the relay answers
+  `ST_BAD_SECRET` ("wrong relay secret") and its status page counts the refusal.
 - No relay address: the Wii finds the relay from its UDP beacon (section 3.7, design R15).
   The Wii and the Pi must be on the same network, and it must not isolate clients.
 - `station`: the physical station number on the label; stamped into every request.

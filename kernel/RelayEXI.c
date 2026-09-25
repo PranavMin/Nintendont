@@ -33,6 +33,12 @@
  * its tcp_port as the relay (relay_ip / relay_port below). Until one arrives
  * both are 0: exi_poll_hdr shows 0 and every request answers ST_INTERNAL
  * "no relay found yet".
+ *
+ * Shared secret (design R16, protocol.yaml relay_auth): every TCP request
+ * starts with a 20-byte relay_auth carrying tournament.cfg's secret=, then
+ * the game's relay_hdr + payload. The game never sees it. A card without a
+ * valid secret= answers ST_INTERNAL "no secret in tournament.cfg" locally;
+ * a wrong one comes back from the relay as ST_BAD_SECRET.
  */
 
 #include "RelayEXI.h"
@@ -92,6 +98,8 @@ struct RelayCfg {
 	u16	station;	/* station */
 	u8	stream;		/* stream (0/1) */
 	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no tournament.cfg" */
+	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in tournament.cfg" */
+	char	secret[SECRET_LEN];	/* NUL-padded, as relay_auth carries it */
 };
 static struct RelayCfg cfg;
 static char cfg_text[RELAY_CFG_MAX] ALIGNED(32);
@@ -118,6 +126,7 @@ static u32 stage_len = 0;
 static vu32 relay_state = RELAY_IDLE;	/* enum exi_poll_state */
 static u8 req_buf[RELAY_REQ_MAX] ALIGNED(32);
 static u32 req_len = 0;
+static u8 send_buf[sizeof(struct relay_auth) + RELAY_REQ_MAX] ALIGNED(32);	/* relay_auth + req_buf, one sendto */
 static u8 resp_buf[RELAY_RESP_MAX] ALIGNED(32);
 static u32 resp_len = 0;
 static u8 rx_chunk[RELAY_RX_CHUNK] ALIGNED(32);	/* 32-byte aligned recvfrom target */
@@ -148,6 +157,24 @@ static bool parseU32(const char *s, u32 max, u32 *out)
 	return *s == 0;
 }
 
+/* secret=: 8 to SECRET_LEN of A-Z a-z 0-9 - _ (the relay's config.ts rule),
+ * then only trailing whitespace. Stored NUL-padded. */
+static bool parseSecret(const char *s, char *out)
+{
+	u32 n = 0;
+	memset(out, 0, SECRET_LEN);
+	while ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') ||
+	       *s == '-' || *s == '_')
+	{
+		if (n == SECRET_LEN)
+			return false;
+		out[n++] = *s++;
+	}
+	while (*s == ' ' || *s == '\t' || *s == '\r')
+		s++;
+	return *s == 0 && n >= 8;
+}
+
 /* key=value lines, keys station / stream (design 4.3), both required, unknown
  * keys ignored, blank lines ignored. relay_ip / relay_port from cards written
  * before relay discovery (design R15) are unknown keys now: ignored, the
@@ -172,7 +199,9 @@ static bool parseCfg(char *text)
 		{
 			const char *val = eq + 1;
 			*eq = 0;
-			if (strcmp(line, "station") == 0)
+			if (strcmp(line, "secret") == 0)
+				cfg.has_secret = parseSecret(val, cfg.secret);
+			else if (strcmp(line, "station") == 0)
 			{
 				have_station = parseU32(val, 65535, &v);
 				cfg.station = (u16)v;
@@ -214,8 +243,8 @@ static void loadCfg(void)
 
 	cfg.ok = parseCfg(cfg_text);
 	if (cfg.ok)
-		dbgprintf("RelayEXI: station %u stream %u (relay address from its beacon, udp %u)\r\n",
-			cfg.station, cfg.stream, BEACON_PORT);
+		dbgprintf("RelayEXI: station %u stream %u secret %s (relay address from its beacon, udp %u)\r\n",
+			cfg.station, cfg.stream, cfg.has_secret ? "set" : "MISSING", BEACON_PORT);
 	else
 		dbgprintf("RelayEXI: %s malformed\r\n", RELAY_CFG_PATH);
 }
@@ -515,8 +544,16 @@ static const char *doRoundTrip(u32 start)
 
 	if (!fail)
 	{
-		res = sendto(top_fd, sock, req_buf, req_len, 0);
-		if (res != (s32)req_len)
+		/* relay_auth then the game's request, in one send (design R16). */
+		struct relay_auth *auth = (struct relay_auth *)send_buf;
+		u32 total = sizeof(struct relay_auth) + req_len;
+		memset(auth, 0, sizeof(*auth));
+		auth->magic[0] = AUTH_MAGIC_0;
+		auth->magic[1] = AUTH_MAGIC_1;
+		memcpy(auth->secret, cfg.secret, SECRET_LEN);
+		memcpy(send_buf + sizeof(struct relay_auth), req_buf, req_len);
+		res = sendto(top_fd, sock, send_buf, total, 0);
+		if (res != (s32)total)
 			fail = "send";
 	}
 
@@ -604,6 +641,11 @@ static u32 RelayEXIThread(void *arg)
 		else if (!NetworkStarted)
 		{
 			synthResponse("no network");
+			fail = NULL;
+		}
+		else if (!cfg.has_secret)
+		{
+			synthResponse("no secret in tournament.cfg");
 			fail = NULL;
 		}
 		else if (relay_ip == 0)
