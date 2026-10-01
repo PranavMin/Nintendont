@@ -597,6 +597,10 @@ static bool teleSend(u8 kind, u32 len)
  * log then still shows the right sum means the PPC ran stale cache, not
  * overwritten memory. */
 static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
+/* Per-line sums of the last sample, to report WHICH part changed. */
+#define TMOD_WATCH_LINES 4096
+static u32 tmod_line_sum[TMOD_WATCH_LINES];
+
 static void watchModule(u32 state, u32 load, u32 len)
 {
 	u32 i, sum = 0, first, lines, lo = 0xFFFFFFFF, hi = 0, changed = 0;
