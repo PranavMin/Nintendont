@@ -69,6 +69,7 @@
 #define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
 #define RELAY_BEACON_SETUP_MS	1000	/* socket/bind failed or network not up yet: try again this often */
 #define RELAY_BEACON_DRAIN_MAX	8	/* datagrams read per poll; beacons come every 2 s */
+#define RELAY_BEACON_REQUEST_MS	2000	/* while no beacon has been heard, ask for one this often */
 #define RELAY_TELEMETRY_TICK_MS	100	/* idle thread sends telemetry this often */
 /* Shown top-right on the kiosk's set list next to the module's own version
  * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
@@ -119,6 +120,24 @@ static char cfg_text[RELAY_CFG_MAX] ALIGNED(32);
 static vu32 relay_ip = 0;
 static vu32 relay_port = 0;
 static s32 beacon_sock = -1;		/* UDP socket bound to BEACON_PORT, -1 until set up */
+/* Beacon request (protocol.yaml relay_beacon): some access points never
+ * deliver the relay's broadcast to this power-saving Wi-Fi client (first
+ * venue-style Wi-Fi test, 2026-09-30: pings answered, no beacon in minutes).
+ * So while relay_ip is 0 we broadcast a relay_beacon with tcp_port 0 to
+ * TELEMETRY_PORT every RELAY_BEACON_REQUEST_MS; the relay answers unicast to
+ * our BEACON_PORT, where serviceBeacon already listens. A connected UDP socket
+ * to 255.255.255.255, the way SlippiNetworkBroadcast.c sends its own. */
+static s32 request_sock = -1;
+static u32 request_ts = 0;
+static u32 request_count = 0;
+static struct relay_beacon request_msg ALIGNED(32);
+static struct sockaddr_in request_addr ALIGNED(32) = {
+	.sin_family = AF_INET,
+	.sin_port = TELEMETRY_PORT,
+	{
+		.s_addr = 0xffffffff,
+	},
+};
 static u32 beacon_ts = 0;		/* HW_TIMER of the last setup attempt or drain */
 static u8 beacon_rx[32] ALIGNED(32);	/* recvfrom target; > sizeof(relay_beacon) so oversize datagrams show */
 
@@ -502,6 +521,39 @@ static void beaconSetup(void)
 	relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
 	beacon_sock = sock;
 	dbgprintf("RelayEXI: listening for relay beacons on udp %u\r\n", BEACON_PORT);
+
+	/* The request sender: a UDP socket connected to the broadcast address. */
+	sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
+	if (sock >= 0)
+	{
+		if (connect(top_fd, sock, (struct sockaddr *)&request_addr) < 0)
+		{
+			dbgprintf("RelayEXI: beacon request socket connect failed\r\n");
+			close(top_fd, sock);
+		}
+		else
+		{
+			memset(&request_msg, 0, sizeof(request_msg));
+			request_msg.magic[0] = RELAY_MAGIC_0;
+			request_msg.magic[1] = RELAY_MAGIC_1;
+			request_msg.version = RELAY_PROTO_VERSION;
+			request_sock = sock;	/* tcp_port 0, event_id 0 = "please send it" */
+			request_ts = read32(HW_TIMER);
+		}
+	}
+}
+
+/* While no beacon has arrived: ask. Nothing to do once relay_ip is known. */
+static void requestBeacon(void)
+{
+	s32 res;
+	if (request_sock < 0 || relay_ip != 0 || TimerDiffMs(request_ts) < RELAY_BEACON_REQUEST_MS)
+		return;
+	request_ts = read32(HW_TIMER);
+	res = sendto(top_fd, request_sock, &request_msg, sizeof(request_msg), 0);
+	request_count++;
+	if (request_count <= 3 || (request_count % 30) == 0)
+		dbgprintf("RelayEXI: beacon request #%u broadcast to udp %u (%d)\r\n", request_count, TELEMETRY_PORT, res);
 }
 
 /* Idle-thread duty: set the socket up once the network is, then every
@@ -524,6 +576,7 @@ static void serviceBeacon(void)
 		beaconSetup();
 		return;
 	}
+	requestBeacon();
 
 	for (n = 0; n < RELAY_BEACON_DRAIN_MAX; n++)
 	{
