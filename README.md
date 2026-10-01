@@ -24,7 +24,6 @@ the relay device design is in [docs/relay-exi-report.md](docs/relay-exi-report.m
 | [lazyto](https://github.com/PranavMin/lazyto) | Relay on the venue's Raspberry Pi; design docs and setup guides |
 | [melee](https://github.com/PranavMin/melee) | `tournament.bin`, the kiosk module |
 | **Nintendont** (this repo) | Wii loader |
-| [Ishiiruka](https://github.com/PranavMin/Ishiiruka) | Slippi Dolphin with the relay forwarder, for development |
 
 Upstream is merged periodically from `project-slippi/Nintendont` `slippi`. Upstream's README follows.
 

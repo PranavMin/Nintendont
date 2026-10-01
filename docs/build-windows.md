@@ -1,9 +1,22 @@
 # Building Slippi Nintendont on Windows
 
-Recipe used on 2026-09-22 for branch `reporter` (kernel + loader). CI builds in the
+Recipe for branch `vanilla-module` (kernel + loader; first used 2026-09-22 on the old branch `reporter`). CI builds in the
 `nikhilnarayana/devkitpro-slippi` Docker image (`.github/workflows/build.yml`); this is the
 native equivalent with devkitPro's pacman inside MSYS2, installed under `C:\devkitPro` so the
 layout matches devkitPro's own Windows installer.
+
+## Known requirements (hardware, 2026-09-30)
+
+Two kernel fixes are required on a real Wii. Keep them when merging or rebasing:
+
+- **BootInfo `0x80000034` arena word.** Nintendont can leave it 0. The module loader
+  (`kernel/Patch.c` `LoadTournamentModule`) must handle that case before checking room for
+  the module and writing `load_addr` there.
+- **FatFS try-lock in `kernel/vsprintf.c`.** `dbgprintf` must only try the log lock, never wait
+  on it: FatFS is not reentrant and a waiting lock deadlocks the kernel.
+
+Kernel changes only reach a Wii through a rebuilt loader (`loader/data/kernel.zip` is
+embedded), and that loader must come from CI (see the IOS58 note below).
 
 ## 1. Toolchain install (once)
 

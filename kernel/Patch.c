@@ -1224,7 +1224,7 @@ static bool fileExist(const char *path)
 	return false;
 }
 
-/* Tournament module (tournament-reporter design.md, vanilla-ISO architecture).
+/* Tournament module (tournament-reporter architecture.md, vanilla-ISO architecture).
  * sd:/tournament.bin is the kiosk's code (melee tools/build_module.py), linked
  * at a fixed address against the stock GALE01 v1.02 symbol map:
  *   "TMOD" u32 version=1 u32 load_addr u32 blob_len u32 n_patches

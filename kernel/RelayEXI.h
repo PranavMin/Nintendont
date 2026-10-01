@@ -1,7 +1,7 @@
 /* kernel/RelayEXI.h
  * Tournament relay EXI device: the ARM side of the fake EXI device that the
  * Melee decomp build (lbrelayexi.c) talks to for the tournament reporter.
- * Design: ../tournament-reporter/docs/design.md section 6.2; investigation:
+ * Design: ../tournament-reporter/docs/architecture.md; investigation:
  * docs/relay-exi-investigation.md.
  *
  * Two contexts touch this module:
@@ -19,7 +19,7 @@
 /* Read sd:/tournament.cfg (station, stream) and spawn the relay thread. Call
  * once at boot after the SD card is mounted; networking may or may not be up.
  * The thread finds the relay itself: once the network is up it listens for
- * the relay's UDP beacon (design R15) and uses the latest one's address. */
+ * the relay's UDP beacon (decisions.md R15) and uses the latest one's address. */
 void RelayEXIInit(void);
 
 /* EXISelect on the relay's channel: forget any half-received transaction. */

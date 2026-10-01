@@ -1,6 +1,6 @@
 /* kernel/RelayEXI.c
- * Tournament relay EXI device (../tournament-reporter/docs/design.md section
- * 6.2, docs/relay-exi-investigation.md).
+ * LazyTO relay EXI device (../tournament-reporter/docs/architecture.md, section
+ * LazyTO Nintendont; docs/history/relay-exi-investigation.md).
  *
  * The game (melee lbrelayexi.c) selects channel 1 / device 0 (slot B, shared
  * with Slippi's own device), writes a 4-byte immediate command word
@@ -25,7 +25,7 @@
  *                                              \--thread-->  RELAY_ERROR
  *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped.
  *
- * Relay discovery (../tournament-reporter/docs/design.md R15, protocol.yaml
+ * Relay discovery (../tournament-reporter/docs/decisions.md R15, protocol.yaml
  * relay_beacon): tournament.cfg carries no relay address. The relay
  * broadcasts a 12-byte relay_beacon every BEACON_INTERVAL_MS to UDP
  * BEACON_PORT; the same thread, while idle, owns a non-blocking UDP socket
@@ -34,7 +34,7 @@
  * both are 0: exi_poll_hdr shows 0 and every request answers ST_INTERNAL
  * "no relay found yet".
  *
- * Shared secret (design R16, protocol.yaml relay_auth): every TCP request
+ * Shared secret (decisions.md R16, protocol.yaml relay_auth): every TCP request
  * starts with a 20-byte relay_auth carrying tournament.cfg's secret=, then
  * the game's relay_hdr + payload. The game never sees it. A card without a
  * valid secret= answers ST_INTERNAL "no secret in tournament.cfg" locally;
@@ -81,7 +81,7 @@
  * net_fcntl(): params = {socket, cmd, flags}, ioctl input length 12, no
  * output. cmd is the POSIX F_GETFL (3) / F_SETFL (4) passed straight through;
  * IOS_O_NONBLOCK is libogc's "(O_NONBLOCK >> 16)" = 0x04. Nothing else in
- * this kernel uses FCNTL (investigation section 3 caveat, design R9). */
+ * this kernel uses FCNTL (investigation section 3 caveat, decisions.md R9). */
 #define RELAY_F_GETFL		3
 #define RELAY_F_SETFL		4
 #define RELAY_IOS_O_NONBLOCK	0x04
@@ -225,7 +225,7 @@ static bool parseSecret(const char *s, char *out)
 
 /* key=value lines, keys station / stream (design 4.3), both required, unknown
  * keys ignored, blank lines ignored. relay_ip / relay_port from cards written
- * before relay discovery (design R15) are unknown keys now: ignored, the
+ * before relay discovery (decisions.md R15) are unknown keys now: ignored, the
  * relay's address comes from its beacon. */
 static bool parseCfg(char *text)
 {
@@ -869,7 +869,7 @@ static const char *doRoundTrip(u32 start)
 
 	if (!fail)
 	{
-		/* relay_auth then the game's request, in one send (design R16). */
+		/* relay_auth then the game's request, in one send (decisions.md R16). */
 		struct relay_auth *auth = (struct relay_auth *)send_buf;
 		u32 total = sizeof(struct relay_auth) + req_len;
 		memset(auth, 0, sizeof(*auth));
@@ -883,7 +883,7 @@ static const char *doRoundTrip(u32 start)
 	}
 
 	/* The relay serves one request per connection and closes after its reply
-	 * (design section 5), so EOF ends the response. */
+	 * (architecture.md), so EOF ends the response. */
 	while (!fail)
 	{
 		u32 rem = remainingMs(start);

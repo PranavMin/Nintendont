@@ -1,7 +1,10 @@
 # RelayEXI report (session 8)
 
-What was built on branch `reporter` for `../tournament-reporter/docs/design.md` section 6.2,
-following `docs/relay-exi-investigation.md` (R3: the EXI handler must never block). All
+> Written on branch `reporter`; the current branch is `vanilla-module`. Section 4 is superseded
+> and kept, marked, for history.
+
+What was built on branch `reporter` for `../tournament-reporter/docs/architecture.md` section 6.2,
+following `docs/history/relay-exi-investigation.md` (R3: the EXI handler must never block). All
 citations are `file:line` in this repo unless noted. No hardware was available; the
 on-hardware checklist is at the end.
 
@@ -115,7 +118,7 @@ thread picks the request up:
 4. `poll(POLLIN)` with the remaining budget, then `recvfrom()` into a 32-byte-aligned chunk
    buffer, appended until the relay closes (recv returns 0), the pattern of
    `waitForMessage`/`getClientMessage` (`kernel/SlippiNetwork.c:96-175`). The relay serves one
-   request per connection and closes after the reply (design section 5), the same end condition
+   request per connection and closes after the reply (architecture.md), the same end condition
    the Dolphin forwarder uses (`EXI_DeviceSlippi.cpp:3695-3698`). `-EAGAIN` just re-polls; a
    response over 4092 bytes (the poll buffer minus the state word) is an error.
 5. `close()` always; a response shorter than `relay_hdr + relay_resp` is "short response".
@@ -142,10 +145,10 @@ not enabled (`NIN_CFG_NETWORK` off, `kernel/main.c:315-326`). The game shows the
 loader's nickname read (`SD_SLIPPI_DAT_FILE`, `common/include/Slippi.h:13`) and without the
 `Shutdown()` on failure. Format (design 4.3): `key=value` lines, `\r\n` tolerated, unknown keys
 ignored, both of `station` (0-65535) and `stream` (0 or 1) required. Missing file, file >= 512
-bytes, or either key missing/invalid -> `cfg.ok = false`. Since 2026-09-25 (design R15) the card
+bytes, or either key missing/invalid -> `cfg.ok = false`. Since 2026-09-25 (decisions.md R15) the card
 has no relay address: `relay_ip`/`relay_port` from older cards are unknown keys and ignored.
 
-### 3.7 Relay discovery (design R15)
+### 3.7 Relay discovery (decisions.md R15)
 
 The relay broadcasts a 12-byte `relay_beacon` (`relay_proto.h`) every `BEACON_INTERVAL_MS` to UDP
 `BEACON_PORT`. The relay thread, whenever it is idle (`RelayEXIThread`, the `relay_state !=
@@ -160,10 +163,15 @@ change logs `RelayEXI: relay is a.b.c.d:port (event N)`.
 `kernel/net.c:263` `recvfrom()` cannot report the source address (its third vector is NULL,
 net.c:278-279), so `RelayEXI.c` has its own `recvfromAddr()` with libogc's vector layout for
 `IOCTLV_SO_RECVFROM` (`network_wii.c` `net_recvfrom`: one input vector {socket, flags}, two
-outputs {data, source sockaddr}). **Unverified on hardware** (2026-09-25): the layout is libogc's,
-the kernel builds clean, but no Wii has received a beacon yet. If `relay_ip` stays 0 on
-hardware while the relay's status page shows the beacon going out, this call is the first
-suspect.
+outputs {data, source sockaddr}). **Verified on hardware 2026-09-30**: a real Wii heard the
+beacon, learned the relay address and ran LIST_SETS.
+
+**Beacon request.** Some access points never deliver the relay's broadcast to a power-saving
+Wi-Fi client. So while `relay_ip` is 0, the relay thread broadcasts a `relay_beacon` with
+`tcp_port` 0 to `TELEMETRY_PORT` (UDP 29472) every 2 s (`requestBeacon()`, `kernel/RelayEXI.c`
+near the `request_sock` declaration). The relay answers unicast to `BEACON_PORT` (UDP 29471),
+where `serviceBeacon()` already listens. The beacon carries the TCP port (29470). This path was
+also heard on hardware 2026-09-30.
 
 Until a beacon is heard, `exi_poll_hdr.relay_ip`/`relay_port` are 0 and every request answers
 `ST_INTERNAL` `"no relay found yet"` without touching the network. Each round trip snapshots
@@ -173,7 +181,7 @@ Note: the kernel mounts `sd:` only when the game boots from SD or Slippi replays
 (`kernel/main.c:197-198,238-249`). Booting the ISO from USB with replays off leaves `sd:`
 unmounted and every relay command answers `"no tournament.cfg"`.
 
-## 4. Version-gate bypass (design R12) - SUPERSEDED 2026-09-24
+## 4. Version-gate bypass (decisions.md R12) - SUPERSEDED 2026-09-24
 
 **Superseded.** The kiosk no longer ships a shifted DOL: the ISO is stock 1.02 and the kiosk
 code is `sd:/tournament.bin`, loaded by `LoadTournamentModule()` in `kernel/Patch.c` inside the
@@ -267,11 +275,11 @@ stream=1
 secret=<the relay's RELAY_SECRET>
 ```
 
-- `secret`: the relay's shared secret (design R16), the same on every card; 8-16 of `A-Z a-z 0-9 - _`.
+- `secret`: the relay's shared secret (decisions.md R16), the same on every card; 8-16 of `A-Z a-z 0-9 - _`.
   Sent as a `relay_auth` block ahead of every request (`doRoundTrip`). Missing or malformed: every
   action shows `no secret in tournament.cfg` without touching the network; wrong: the relay answers
   `ST_BAD_SECRET` ("wrong relay secret") and its status page counts the refusal.
-- No relay address: the Wii finds the relay from its UDP beacon (section 3.7, design R15).
+- No relay address: the Wii finds the relay from its UDP beacon (section 3.7, decisions.md R15).
   The Wii and the Pi must be on the same network, and it must not isolate clients.
 - `station`: the physical station number on the label; stamped into every request.
 - `stream`: `1` on **exactly one** Wii, the stream station, `0` everywhere else. The relay refuses

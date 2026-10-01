@@ -1,3 +1,5 @@
+> Superseded: session-3 investigation on the retired branch `reporter`; see docs/relay-exi-report.md.
+
 # RelayEXI investigation (design.md §6.2, R3)
 
 Read-only investigation of Slippi Nintendont (branch `reporter`) answering the five questions
