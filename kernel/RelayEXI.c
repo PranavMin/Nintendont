@@ -74,7 +74,7 @@
 /* Shown top-right on the kiosk's set list next to the module's own version
  * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
  * behaviour the TO should be able to tell apart on the TV. */
-#define RELAY_HOST_BUILD	1
+#define RELAY_HOST_BUILD	2	/* 2: network init off the boot path, PF_NET_JOINING */
 #define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
@@ -417,7 +417,8 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 		ph->state = (u8)relay_state;
 		/* What this host already knows is wrong (exi_poll_flags), so the
 		 * kiosk can say "no network" instead of waiting for a beacon. */
-		ph->flags = (NetworkStarted ? 0 : PF_NO_NETWORK)
+		ph->flags = (NetworkStarted ? 0
+				: ConfigGetConfig(NIN_CFG_NETWORK) ? PF_NET_JOINING : PF_NO_NETWORK)
 			| (cfg.ok ? 0 : PF_NO_CFG)
 			| (cfg.has_secret ? 0 : PF_NO_SECRET);
 		ph->station = cfg.station;

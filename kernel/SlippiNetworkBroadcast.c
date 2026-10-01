@@ -23,6 +23,7 @@ static u32 SlippiNetworkBroadcastHandlerThread(void *arg);
 
 // Global state from kernel/net.c
 extern s32 top_fd;
+extern u32 NetworkStarted;
 extern u8 wifi_mac_address[6];
 
 // Broadcast message structure
@@ -110,6 +111,9 @@ s32 do_broadcast(void)
 static u32 SlippiNetworkBroadcastHandlerThread(void *arg)
 {
 	int status;
+	/* The network comes up on its own thread (net.c NetworkInitThread). */
+	while (!NetworkStarted)
+		mdelay(100);
 	startBroadcast();
 
 	while (1)

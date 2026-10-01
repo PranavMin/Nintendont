@@ -76,6 +76,34 @@ int NCDInit(void)
 	return 0;
 }
 
+/* NetworkInitThread()
+ * Brings the network up off the main boot path (LazyTO, 2026-09-30). IOS's
+ * SO_STARTUP blocks until the Wi-Fi has associated and DHCP has answered,
+ * with no timeout, and upstream called NCDInit() from main(): a slow or
+ * refused join hung the whole boot at "Slippi network init" and only a power
+ * cycle helped. Melee boots regardless now. Everything that needs sockets
+ * waits on NetworkStarted (the Slippi threads, RelayEXI per request), and the
+ * kiosk shows PF_NET_JOINING until it flips. */
+extern char __net_init_stack_addr, __net_init_stack_size;
+static u32 NetworkInit_Thread;
+
+static u32 NetworkInitThread(void *arg)
+{
+	NCDInit();	/* sets NetworkStarted = 1 at its end */
+	dbgprintf("NetworkInitThread: network up\r\n");
+	return 0;
+}
+
+void NetworkInitAsync(void)
+{
+	NetworkInit_Thread = do_thread_create(
+		NetworkInitThread,
+		((u32 *)&__net_init_stack_addr),
+		((u32)(&__net_init_stack_size)),
+		0x78);
+	thread_continue(NetworkInit_Thread);
+}
+
 void InitMacAddress(void) {
 	s32 res;
 	STACK_ALIGN(ioctlv, mac_vec, 2, 32);

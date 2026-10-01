@@ -308,16 +308,18 @@ int _main( int argc, char *argv[] )
 
 /* NETWORK_INIT BOOT STAGE.
  * Initialize the MAC address before initializing networking or file writing.
- * If a user has Slippi networking enabled, initialize the network.
- * Then, spawn the Slippi networking threads.
+ * If a user has Slippi networking enabled, start the network coming up on its
+ * own thread (net.c NetworkInitThread: the IOS socket start-up blocks until
+ * the Wi-Fi join and DHCP finish, with no timeout, so it must not sit on this
+ * path - LazyTO 2026-09-30). The Slippi networking threads are spawned here
+ * as before and wait for NetworkStarted themselves.
  */
 	InitMacAddress();
 	u32 UseNetwork = ConfigGetConfig(NIN_CFG_NETWORK);
 	if (UseNetwork == 1)
 	{
 		BootStatus(NETWORK_INIT, s_size, s_cnt);
-		NCDInit();
-		NetworkStarted = 1;
+		NetworkInitAsync();
 		SlippiNetworkInit();
 #ifdef SLIPPI_DEBUG
 		SlippiDebugInit();

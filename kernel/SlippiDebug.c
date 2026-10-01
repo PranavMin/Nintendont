@@ -17,6 +17,7 @@ static u32 SlippiDebugThread(void *arg);
 
 // From kernel/net.c
 extern s32 top_fd;
+extern u32 NetworkStarted;
 
 // Socket structures for this thread
 s32 debug_sock ALIGNED(32);
@@ -73,6 +74,9 @@ static u32 SlippiDebugThread(void *arg)
 {
 	s32 res;
 
+	/* The network comes up on its own thread (net.c NetworkInitThread). */
+	while (!NetworkStarted)
+		mdelay(100);
 	// Initialize socket on the broadcast address
 	debug_sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
 	res = connect(top_fd, debug_sock, (struct sockaddr *)&debug_sockaddr);

@@ -1125,7 +1125,7 @@ int main(int argc, char **argv)
 			if(STATUS_LOADING == NETWORK_INIT)
 				PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*12, "Slippi network init...");
 			if(abs(STATUS_LOADING) > NETWORK_INIT && abs(STATUS_LOADING) < 20)
-				PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*12, "Slippi network init... Done!");
+				PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*12, "Slippi network init... started (joins in the background)");
 			if(STATUS_LOADING == -6)
 				PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*12, "Slippi network init... Error! %d Shutting down", STATUS_ERROR);
 

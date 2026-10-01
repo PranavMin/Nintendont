@@ -42,6 +42,9 @@ __ven_change_stack_addr = __slippi_debug_stack_addr + __ven_change_stack_size;
 __relay_exi_stack_size = 0x2000;
 __relay_exi_stack_addr = __ven_change_stack_addr + __relay_exi_stack_size;
 
+__net_init_stack_size = 0x1000;
+__net_init_stack_addr = __relay_exi_stack_addr + __net_init_stack_size;
+
 MEMORY {
 
 	code		: ORIGIN = 0x12F00000,	LENGTH = 0x60000

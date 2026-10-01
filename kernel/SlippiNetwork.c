@@ -56,6 +56,7 @@ struct SlippiClient client_prev ALIGNED(32);
 
 // Global network state
 extern s32 top_fd;			// from kernel/net.c
+extern u32 NetworkStarted;		// from kernel/net.c
 u32 SlippiServerStarted = 0;		// used by kernel/main.c
 
 // Shared state from SlippiMemory.c
@@ -532,6 +533,9 @@ s32 handleFileTransfer()
  */
 static u32 SlippiNetworkHandlerThread(void *arg)
 {
+	/* The network comes up on its own thread (net.c NetworkInitThread). */
+	while (!NetworkStarted)
+		mdelay(100);
 	while (1)
 	{
 		int status = getConnectionStatus();

@@ -12,7 +12,7 @@ on-hardware checklist is at the end.
 | `kernel/relay_proto.h` | Verbatim copy of `../tournament-reporter/generated/relay_proto.h` (GENERATED from `protocol.yaml`, never hand-edit; re-copy on protocol changes). |
 | `kernel/RelayEXI.h`, `kernel/RelayEXI.c` | The relay device: config, EXI hooks, state machine, relay thread. |
 | `kernel/EXI.c:34,736-745,781-790,856-864` | Wiring into the existing EXI dispatch for slot B (EXISelect / EXIImm / EXIDMA). |
-| `kernel/main.c:44,328-330` | `RelayEXIInit()` right after the NETWORK_INIT stage. |
+| `kernel/main.c:44,328-330` | `RelayEXIInit()` right after the NETWORK_INIT stage. Since host build 2 (2026-09-30) that stage only starts `net.c NetworkInitThread`; `NCDInit()` (IOS `SO_STARTUP`, which blocks until the Wi-Fi join and DHCP finish, no timeout) runs there, the Slippi threads wait on `NetworkStarted`, and the poll header says `PF_NET_JOINING` until it flips. Before that a slow join hung the boot at "Slippi network init". |
 | `kernel/kernel.ld:42-43` | `__relay_exi_stack_*`, 0x2000 bytes appended to the thread-stack chain. |
 | `kernel/Makefile:42` | `RelayEXI.o` added to `OBJECTS`. |
 | `kernel/Patch.c:139-154,170-177,1266-1268,1356` | Version-gate bypass for the tournament build (section 4). |
