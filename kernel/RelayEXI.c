@@ -562,19 +562,53 @@ static bool teleSend(u8 kind, u32 len)
  * log then still shows the right sum means the PPC ran stale cache, not
  * overwritten memory. */
 static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
+/* Per-line sums of the last sample, to report WHICH part changed. */
+#define TMOD_WATCH_LINES 4096
+static u32 tmod_line_sum[TMOD_WATCH_LINES];
+
+/* Melee 1.02 globals the game's arena is kept in (config/GALE01/symbols.txt). */
+#define MELEE_OS_ARENA_LO 0x4D5C10	/* __OSArenaLo (PPC 0x804D5C10) */
+#define MELEE_OS_ARENA_HI 0x4D7370	/* __OSArenaHi (PPC 0x804D7370) */
 
 static void watchModule(u32 state, u32 load, u32 len)
 {
-	u32 i, sum = 0, first;
-	if (state != MOD_LOADED || tmod_watch_n > 60 || tele_uptime - tmod_watch_ms < 1000)
+	u32 i, sum = 0, first, lines, lo = 0xFFFFFFFF, hi = 0, changed = 0;
+	if (state != MOD_LOADED || tmod_watch_n > 150 || tele_uptime - tmod_watch_ms < 200)
 		return;
 	tmod_watch_ms = tele_uptime;
-	sync_before_read((void*)P2C(load), (len + 31) & ~31);
+	lines = (len + 31) >> 5;
+	if (lines > TMOD_WATCH_LINES)
+		lines = TMOD_WATCH_LINES;
+	sync_before_read((void*)P2C(load), lines << 5);
 	first = read32(P2C(load));
-	for (i = 0; i + 4 <= len; i += 4)
-		sum += read32(P2C(load) + i);
+	for (i = 0; i < lines; i++)
+	{
+		u32 k, ls = 0, a = P2C(load) + (i << 5);
+		for (k = 0; k < 32; k += 4)
+			ls += read32(a + k);
+		sum += ls;
+		if (tmod_watch_n > 0 && ls != tmod_line_sum[i])
+		{
+			changed++;
+			if (i < lo) lo = i;
+			if (i > hi) hi = i;
+		}
+		tmod_line_sum[i] = ls;
+	}
 	if (tmod_watch_n == 0 || sum != tmod_watch_sum)
-		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x\r\n", tmod_watch_n, tele_uptime, first, sum);
+	{
+		u32 alo, ahi;
+		sync_before_read((void*)0x0, 0x40);
+		sync_before_read((void*)(MELEE_OS_ARENA_LO & ~31), 32);
+		sync_before_read((void*)(MELEE_OS_ARENA_HI & ~31), 32);
+		alo = read32(MELEE_OS_ARENA_LO);
+		ahi = read32(MELEE_OS_ARENA_HI);
+		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x; %u lines changed, %08x..%08x\r\n",
+			tmod_watch_n, tele_uptime, first, sum, changed,
+			changed ? load + (lo << 5) : 0, changed ? load + (hi << 5) + 31 : 0);
+		dbgprintf("TMOD:game arena lo %08x hi %08x; boot words 30 %08x 34 %08x 38 %08x 3c %08x f0 %08x f4 %08x\r\n",
+			alo, ahi, read32(0x30), read32(0x34), read32(0x38), read32(0x3C), read32(0xF0), read32(0xF4));
+	}
 	tmod_watch_sum = sum;
 	tmod_watch_n++;
 }
