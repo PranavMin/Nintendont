@@ -49,9 +49,8 @@ function Text([string]$str, [float]$px, [float]$cy, [System.Drawing.Color]$c) {
     $g.DrawString($str, $font, (New-Object System.Drawing.SolidBrush $c), $r, $fmt)
 }
 
-Text "KEGSTAND'S" 9.5 10.5 ([System.Drawing.Color]::FromArgb(255, 150, 190, 255))
-Text "TOURNAMENT" 17 25 ([System.Drawing.Color]::White)
-Text "MOD" 9.5 39 ([System.Drawing.Color]::FromArgb(255, 255, 200, 60))
+Text "KEGSTAND'S" 19 19 ([System.Drawing.Color]::White)
+Text "TOURNAMENT MOD" 9.5 36 ([System.Drawing.Color]::FromArgb(255, 150, 190, 255))
 
 $small = New-Object System.Drawing.Bitmap $W, $H, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $gs = [System.Drawing.Graphics]::FromImage($small)
