@@ -1253,6 +1253,18 @@ static u32 tmodBE32(const u8 *p)
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
 }
 
+/* First word and 32-bit word sum of the module as RAM holds it (ARM cache
+ * dropped first), for the log: compare with the file to tell "never landed"
+ * from "overwritten" from "the PPC ran stale cache". */
+static void TModReadback(const char *when, u32 load, u32 len)
+{
+	u32 i, sum = 0;
+	sync_before_read((void*)P2C(load), (len + 31) & ~31);
+	for (i = 0; i + 4 <= len; i += 4)
+		sum += read32(P2C(load) + i);
+	dbgprintf("TMOD:RAM %s: first %08x, sum %08x\r\n", when, read32(P2C(load)), sum);
+}
+
 static void LoadTournamentModule(void)
 {
 	FIL fp;
@@ -1352,6 +1364,7 @@ static void LoadTournamentModule(void)
 	else
 		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top unset (game default %08x), FST word %08x\r\n",
 			len, load, n, TMOD_DEFAULT_ARENA_HI, read32(0x38));
+	TModReadback("after load", load, len);
 	TelemetrySetModule(MOD_LOADED, len, load, n, arena_hi);
 }
 
@@ -4095,6 +4108,10 @@ void SetIPL_TRI()
 
 #define FLUSH_LEN (RESET_STATUS+4)
 #define FLUSH_ADDR (RESET_STATUS+8)
+/* Second range FakeEntryLoad invalidates: the tournament module, which the ARM
+ * wrote outside the DOL range (0 lines = none). */
+#define MOD_FLUSH_ADDR (RESET_STATUS+0xC)
+#define MOD_FLUSH_LEN (RESET_STATUS+0x10)
 void PatchGame()
 {
 	if (Datel && (AppLoaderSize != 0))
@@ -4165,6 +4182,23 @@ void PatchGame()
 	if ((TITLE_ID) != 0x474f37)  // 007 Nightfire
 		Command2 |= 0x80000000;
 	write32( FLUSH_ADDR, Command2 );
+	{
+		u32 mstate, mlen, mload, mpatches, marena;
+		TelemetryGetModule(&mstate, &mlen, &mload, &mpatches, &marena);
+		if (mstate == MOD_LOADED)
+		{
+			u32 start = mload & ~31;
+			write32(MOD_FLUSH_ADDR, start | 0x80000000);
+			write32(MOD_FLUSH_LEN, (mload + mlen - start + 31) >> 5);
+			dbgprintf("TMOD:PPC caches invalidated over %08x, %u lines\r\n", start, (mload + mlen - start + 31) >> 5);
+			TModReadback("before entry", mload, mlen);
+		}
+		else
+		{
+			write32(MOD_FLUSH_ADDR, 0);
+			write32(MOD_FLUSH_LEN, 0);
+		}
+	}
 	dbgprintf("Jumping to 0x%08X\n", GameEntry);
 	sync_after_write((void*)0x1000, 0x2000); //low patches
 	write32( RESET_STATUS, GameEntry );
