@@ -1241,8 +1241,12 @@ static bool fileExist(const char *path)
 #define TMOD_PATH "sd:/tournament.bin"
 /* Melee 1.02's OSInit (0x803430E0..0x803430FC) reads BootInfo arenaHi from
  * 0x80000034 and, when it is 0, uses this built-in top instead (lis r3,0x8170).
- * Nintendont boots the DOL itself and never fills 0x34 (first hardware run,
- * 2026-09-30: "arena top 00000000"), so on a Wii the game's heap ends here. */
+ * On a Wii the apploader DOES fill 0x34 (the FST base, 0x817F8AC0 for Melee):
+ * the "arena top 00000000" of the first hardware runs (2026-09-30) was this
+ * ARM reading low memory through a stale cache line, which then left 0x34
+ * alone, so the game zeroed its heap right over the module one second after
+ * entry (RAM watch #1: all zeros). Low memory is read with the ARM cache
+ * dropped first; this default is only for a genuinely unset word. */
 #define TMOD_DEFAULT_ARENA_HI 0x81700000
 #define TMOD_HDR 28
 #define TMOD_MAX_LEN 0x80000
@@ -1279,6 +1283,9 @@ static void LoadTournamentModule(void)
 	bool arena_unset = false;
 	u8 *patches;
 
+	/* BootInfo (0x80000000..0x3F) is written by the PPC-side apploader; the
+	 * ARM must not read it from its own cache. */
+	sync_before_read((void*)0x0, 0x40);
 	if (f_open_char(&fp, TMOD_PATH, FA_READ | FA_OPEN_EXISTING) != FR_OK)
 	{
 		dbgprintf("TMOD:%s not found, plain Melee\r\n", TMOD_PATH);
@@ -1361,10 +1368,13 @@ static void LoadTournamentModule(void)
 	free(patches);
 	if (!arena_unset)
 	{
+		/* The game's heap must end below the module: OSInit takes this as
+		 * arenaHi and Melee zeroes everything up to it. */
 		write32(0x34, load);
 		sync_after_write((void*)0x0, 0x40);
-		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x\r\n",
-			len, load, n, arena_hi, load);
+		sync_before_read((void*)0x0, 0x40);
+		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x (read back %08x), FST %08x\r\n",
+			len, load, n, arena_hi, load, read32(0x34), read32(0x38));
 	}
 	else
 		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top unset (game default %08x), FST word %08x\r\n",
