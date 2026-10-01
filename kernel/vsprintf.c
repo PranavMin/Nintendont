@@ -307,6 +307,20 @@ int _vsprintf(char *buf, const char *fmt, va_list args)
  */
 extern u32 early_gecko_logging; 
 extern u32 slippi_use_port_a;
+/* Try-lock on the ARM9 SWP instruction (same shape as Telemetry.c). */
+static vu32 sdlog_lock = 0;
+static inline bool sdlog_trylock(void)
+{
+	u32 old;
+	__asm__ volatile("swp %0, %1, [%2]" : "=&r"(old) : "r"(1), "r"(&sdlog_lock) : "memory");
+	return old == 0;
+}
+static inline void sdlog_unlock(void)
+{
+	__asm__ volatile("" ::: "memory");
+	sdlog_lock = 0;
+}
+
 int dbgprintf( const char *fmt, ...)
 {
 	// If no logging is enabled, do nothing.
@@ -350,13 +364,19 @@ int dbgprintf( const char *fmt, ...)
 		sendto(top_fd, debug_sock, buffer, strlen(buffer), 0);
 #endif
 
-	// Deal with writes to SD card
+	// Deal with writes to SD card. FatFS is not reentrant and this is called
+	// from several threads (main at boot, the relay thread for its beacon
+	// requests, DI); two of them inside f_write/f_sync on the same FIL at
+	// once wedged the main thread at "Kernel Start" (Auto Boot, 2026-09-30).
+	// One writer at a time; a thread that finds the log busy skips the SD
+	// copy of its line (the telemetry ring above still has it). Never wait.
 
-	if ((sdhc_log_enabled == 1) && (sdhc_log_status == FR_OK))
+	if ((sdhc_log_enabled == 1) && (sdhc_log_status == FR_OK) && sdlog_trylock())
 	{
 		f_lseek(&sdhc_log, sdhc_log.obj.objsize);
 		f_write(&sdhc_log, buffer, strlen(buffer), &num_bytes);
 		f_sync(&sdhc_log);
+		sdlog_unlock();
 	}
 
 	return 0;
