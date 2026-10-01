@@ -34,4 +34,13 @@ void USBStorage_Shutdown(void);
 void USBStorage_UpdateRegisters_MainThread(void);
 bool USBStorage_IsInserted_SlippiThread(void);
 
+/* LazyTO beamer mailbox (RelayEXI.c, relay thread only). USBStorage_Mount
+ * returns the mounted drive's id (0 = nothing mounted; a new id per mount, so a
+ * re-inserted or swapped drive is a different one) and its sector size. The
+ * Read/WriteMounted calls run the cycle only while that same mount is still
+ * there. All three take the USB lock (usbstorage.c). */
+u32 USBStorage_Mount(u32 *sector_size);
+bool USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer);
+bool USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer);
+
 #endif /* __USBSTORAGE_H__ */

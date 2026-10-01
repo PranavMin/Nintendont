@@ -9,17 +9,21 @@
  *     which must never block: RelayEXISelect/ImmWrite/DMARead only copy
  *     bytes and flip a state word;
  *   - one dedicated kernel thread (RelayEXIInit spawns it) that does the
- *     socket -> connect -> send -> recv -> close round trip.
+ *     socket -> connect -> send -> recv -> close round trip, or with
+ *     tournament.cfg transport=beamer the same bytes through the beamer's
+ *     USB mailbox (RelayEXI.c header).
  */
 #ifndef __RELAY_EXI_H__
 #define __RELAY_EXI_H__
 
 #include "global.h"
 
-/* Read sd:/tournament.cfg (station, stream) and spawn the relay thread. Call
- * once at boot after the SD card is mounted; networking may or may not be up.
- * The thread finds the relay itself: once the network is up it listens for
- * the relay's UDP beacon (decisions.md R15) and uses the latest one's address. */
+/* Read sd:/tournament.cfg (station, stream, secret, transport) and spawn the
+ * relay thread. Call once at boot after the SD card is mounted (and USB
+ * started); networking may or may not be up. The thread finds the relay
+ * itself: once the network is up it listens for the relay's UDP beacon
+ * (decisions.md R15) and uses the latest one's address; with the beamer it
+ * takes the address from the beamer's hello. */
 void RelayEXIInit(void);
 
 /* EXISelect on the relay's channel: forget any half-received transaction. */
