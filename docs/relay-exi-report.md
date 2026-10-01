@@ -225,6 +225,14 @@ revision warning (`loader/source/menu.c:849-856`, UI only).
 
 ## 5. What remains for the on-hardware test
 
+**Hardware result, 2026-09-30:** items 1, 3 and 4 below are verified on a Wii (first LIST_SETS
+answered in 55 ms, set list shown, `.slp` not yet checked); the beacon's `recvfromAddr` works.
+What it took is in tournament-reporter `docs/wii-setup.md` section 6: a CI-built loader (the local
+build fails at the IOS58 step), and the PPC entry stub lowering BootInfo arenaHi to the module
+base, because the ARM cannot see or change that word (it lives in the PPC data cache) and Melee
+zeroes its heap up to it.
+
+
 Nothing in this session ran on a Wii. Open points to verify, in order:
 
 1. **EXI path end to end.** The game's `EXIImmEx` request arrives as 4-byte immediate words on
