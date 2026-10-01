@@ -1012,10 +1012,9 @@ static void Menu_Settings_InputHandler(MenuCtx *ctx)
 				// skip
 				ctx->settings.posX++;
 			}
-			else if (ctx->settings.posX == NIN_SLIPPI_BLANK_1 ||
-				ctx->settings.posX == NIN_SLIPPI_BLANK_2)
+			else if (ctx->settings.posX == NIN_SLIPPI_BLANK_2)
 			{
-				// skip
+				// skip the MELEE CODES header row
 				ctx->settings.posX = NIN_SLIPPI_DYNAMIC_CODES_START;
 			}
 			break;
@@ -1058,10 +1057,10 @@ static void Menu_Settings_InputHandler(MenuCtx *ctx)
 				// skip
 				ctx->settings.posX--;
 			}
-			else if (ctx->settings.posX == NIN_SLIPPI_BLANK_1 || ctx->settings.posX == NIN_SLIPPI_BLANK_2)
+			else if (ctx->settings.posX == NIN_SLIPPI_BLANK_2)
 			{
-				// Blank spots are skipped
-				ctx->settings.posX = NIN_SLIPPI_DYNAMIC_CODES_START - 3;
+				// The header row is skipped: land on the last LazyTO audio row
+				ctx->settings.posX = NIN_SLIPPI_MELEE_STEREO;
 			}
 
 			// Skip replays led line if replays are off
@@ -1258,6 +1257,12 @@ static void Menu_Settings_InputHandler(MenuCtx *ctx)
 			case NIN_SLIPPI_CUSTOM_CODES:
 				ncfg->Config ^= (NIN_CFG_CHEATS);
 				break;
+			case NIN_SLIPPI_MELEE_MUSIC:
+				ncfg->Config ^= (NIN_CFG_MELEE_MUSIC);
+				break;
+			case NIN_SLIPPI_MELEE_STEREO:
+				ncfg->Config ^= (NIN_CFG_MELEE_STEREO);
+				break;
 			default: ; // need semicolon to declare variable on next line
 				const MeleeCodeConfig *codeConfig = GetMeleeCodeConfig();
 				int index = ctx->settings.posX - NIN_SLIPPI_DYNAMIC_CODES_START;
@@ -1439,7 +1444,16 @@ static void Menu_Settings_Redraw(MenuCtx *ctx)
 		// Custom Cheats
 		PrintFormat(MENU_SIZE, BLACK, MENU_POS_X + SETTINGS_X_START, SettingY(ListLoopIndex),
 				"%-18s:%-4s", "Custom Cheats/GCT", (ncfg->Config & (NIN_CFG_CHEATS)) ? "Yes" : "No ");
-		ListLoopIndex += 2;
+		ListLoopIndex++;
+
+		// LazyTO kiosk audio (sent to the game in the relay EXI poll header;
+		// the kiosk forces music off and mono unless these say otherwise)
+		PrintFormat(MENU_SIZE, BLACK, MENU_POS_X + SETTINGS_X_START, SettingY(ListLoopIndex),
+				"%-18s:%-4s", "Melee Music", (ncfg->Config & (NIN_CFG_MELEE_MUSIC)) ? "On " : "Off");
+		ListLoopIndex++;
+		PrintFormat(MENU_SIZE, BLACK, MENU_POS_X + SETTINGS_X_START, SettingY(ListLoopIndex),
+				"%-18s:%-4s", "Melee Audio", (ncfg->Config & (NIN_CFG_MELEE_STEREO)) ? "Stereo" : "Mono");
+		ListLoopIndex++;
 
 		PrintFormat(14, DARK_BLUE, MENU_POS_X + SETTINGS_X_START, SettingY(ListLoopIndex), "MELEE CODES");
 		ListLoopIndex++;

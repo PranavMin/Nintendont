@@ -48,6 +48,10 @@ enum ninconfigbitpos
 	NIN_CFG_BIT_NETWORK		= (13),
 	NIN_CFG_BIT_SLIPPI_REPLAYS	= (14),
 	NIN_CFG_BIT_SLIPPI_PORT_A = (15),
+	// LazyTO kiosk: Melee audio choices passed to the game through the relay EXI
+	// poll header (exi_poll_hdr.host_opts). Clear = the kiosk's venue defaults.
+	NIN_CFG_BIT_MELEE_MUSIC	= (16),	// keep Melee's music on
+	NIN_CFG_BIT_MELEE_STEREO	= (17),	// keep stereo
 
 	// Internal kernel settings.
 	NIN_CFG_BIT_MC_SLOTB	= (31),	// Slot B image is loaded
@@ -72,6 +76,8 @@ enum ninconfig
 	NIN_CFG_NETWORK 	= (1<<NIN_CFG_BIT_NETWORK),
 	NIN_CFG_SLIPPI_REPLAYS 	= (1<<NIN_CFG_BIT_SLIPPI_REPLAYS),
 	NIN_CFG_SLIPPI_PORT_A 	= (1<<NIN_CFG_BIT_SLIPPI_PORT_A),
+	NIN_CFG_MELEE_MUSIC	= (1<<NIN_CFG_BIT_MELEE_MUSIC),
+	NIN_CFG_MELEE_STEREO	= (1<<NIN_CFG_BIT_MELEE_STEREO),
 
 	NIN_CFG_MC_SLOTB	= (1<<NIN_CFG_BIT_MC_SLOTB),
 };
@@ -99,8 +105,9 @@ enum ninslippisettings
 	NIN_SLIPPI_BLANK_0,
 	NIN_SLIPPI_PORT_A,
 	NIN_SLIPPI_CUSTOM_CODES,
-	NIN_SLIPPI_BLANK_1,
-	NIN_SLIPPI_BLANK_2,
+	NIN_SLIPPI_MELEE_MUSIC,		// LazyTO: keep Melee's music (kiosk default: off)
+	NIN_SLIPPI_MELEE_STEREO,	// LazyTO: keep stereo (kiosk default: mono)
+	NIN_SLIPPI_BLANK_2,		// the MELEE CODES header row
 	NIN_SLIPPI_DYNAMIC_CODES_START,
 };
 

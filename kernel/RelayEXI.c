@@ -53,6 +53,7 @@
 #include "net.h"
 #include "ff_utf8.h"
 #include "Telemetry.h"
+#include "Config.h"
 
 /* Game-side contract, melee/src/melee/lb/lbrelayexi.h. */
 #define RELAY_EXI_BUF_SIZE	4096	/* LB_RELAY_EXI_BUF_SIZE */
@@ -69,6 +70,10 @@
 #define RELAY_BEACON_SETUP_MS	1000	/* socket/bind failed or network not up yet: try again this often */
 #define RELAY_BEACON_DRAIN_MAX	8	/* datagrams read per poll; beacons come every 2 s */
 #define RELAY_TELEMETRY_TICK_MS	100	/* idle thread sends telemetry this often */
+/* Shown top-right on the kiosk's set list next to the module's own version
+ * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
+ * behaviour the TO should be able to tell apart on the TV. */
+#define RELAY_HOST_BUILD	1
 #define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
@@ -399,6 +404,9 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 		ph->station = cfg.station;
 		ph->relay_ip = relay_ip;		/* 0 until a beacon is heard */
 		ph->relay_port = (u16)relay_port;
+		ph->host_opts = (ConfigGetConfig(NIN_CFG_MELEE_MUSIC) ? HO_MUSIC_ON : 0)
+			| (ConfigGetConfig(NIN_CFG_MELEE_STEREO) ? HO_STEREO : 0);
+		ph->host_build = RELAY_HOST_BUILD;
 	}
 	else
 		poll_image[0] = (u8)relay_state;
