@@ -37,6 +37,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "codehandler.h"
 #include "codehandleronly.h"
 #include "ff_utf8.h"
+#include "Telemetry.h"
+#include "relay_proto.h"
 
 #include "../common/config/MeleeCodes.h"
 
@@ -1237,6 +1239,11 @@ static bool fileExist(const char *path)
  * Melee, one log line. Any other problem: logged, nothing written. The
  * Ishiiruka fork does the same for Dolphin. */
 #define TMOD_PATH "sd:/tournament.bin"
+/* Melee 1.02's OSInit (0x803430E0..0x803430FC) reads BootInfo arenaHi from
+ * 0x80000034 and, when it is 0, uses this built-in top instead (lis r3,0x8170).
+ * Nintendont boots the DOL itself and never fills 0x34 (first hardware run,
+ * 2026-09-30: "arena top 00000000"), so on a Wii the game's heap ends here. */
+#define TMOD_DEFAULT_ARENA_HI 0x81700000
 #define TMOD_HDR 28
 #define TMOD_MAX_LEN 0x80000
 #define TMOD_MAX_PATCHES 256
@@ -1252,17 +1259,20 @@ static void LoadTournamentModule(void)
 	UINT rd = 0;
 	u8 hdr[TMOD_HDR];
 	u32 version, load, len, n, gaddr, gword, arena_hi, i;
+	bool arena_unset = false;
 	u8 *patches;
 
 	if (f_open_char(&fp, TMOD_PATH, FA_READ | FA_OPEN_EXISTING) != FR_OK)
 	{
 		dbgprintf("TMOD:%s not found, plain Melee\r\n", TMOD_PATH);
+		TelemetrySetModule(MOD_NOT_FOUND, 0, 0, 0, read32(0x34));
 		return;
 	}
 	if (fp.obj.objsize < TMOD_HDR || f_read(&fp, hdr, TMOD_HDR, &rd) != FR_OK || rd != TMOD_HDR
 		|| memcmp(hdr, "TMOD", 4) != 0)
 	{
 		dbgprintf("TMOD:%s is not a TMOD file\r\n", TMOD_PATH);
+		TelemetrySetModule(MOD_BAD_FILE, 0, 0, 0, read32(0x34));
 		f_close(&fp);
 		return;
 	}
@@ -1276,6 +1286,7 @@ static void LoadTournamentModule(void)
 		|| fp.obj.objsize != TMOD_HDR + n * 8 + len || (load & 0x8000001F) != 0x80000000)
 	{
 		dbgprintf("TMOD:bad header (v%u load %08x len %u patches %u)\r\n", version, load, len, n);
+		TelemetrySetModule(MOD_BAD_HEADER, len, load, n, read32(0x34));
 		f_close(&fp);
 		return;
 	}
@@ -1283,13 +1294,32 @@ static void LoadTournamentModule(void)
 	{
 		dbgprintf("TMOD:guard %08x != %08x at %08x - not stock Melee 1.02, not loaded\r\n",
 			read32(P2C(gaddr)), gword, gaddr);
+		TelemetrySetModule(MOD_GUARD, len, load, n, read32(0x34));
 		f_close(&fp);
 		return;
 	}
 	arena_hi = read32(0x34);
-	if (arena_hi < load + len)
+	if (arena_hi == 0)
+	{
+		/* Unset (always, under Nintendont): the game will use its built-in
+		 * TMOD_DEFAULT_ARENA_HI. A module at or above it is outside the heap,
+		 * and 0x34 stays 0 so Melee's memory layout is exactly stock. The
+		 * FST sits at the very top of MEM1 (0x817F8AC0 for Melee's 0x7529
+		 * bytes), above the module's end. */
+		if (load < TMOD_DEFAULT_ARENA_HI)
+		{
+			dbgprintf("TMOD:arena top unset and module at %08x is below the game's default %08x\r\n",
+				load, TMOD_DEFAULT_ARENA_HI);
+			TelemetrySetModule(MOD_ARENA, len, load, n, arena_hi);
+			f_close(&fp);
+			return;
+		}
+		arena_unset = true;
+	}
+	else if (arena_hi < load + len)
 	{
 		dbgprintf("TMOD:arena top %08x below module end %08x\r\n", arena_hi, load + len);
+		TelemetrySetModule(MOD_ARENA, len, load, n, arena_hi);
 		f_close(&fp);
 		return;
 	}
@@ -1298,6 +1328,7 @@ static void LoadTournamentModule(void)
 		|| f_read(&fp, (void*)P2C(load), len, &rd) != FR_OK || rd != len)
 	{
 		dbgprintf("TMOD:read failed\r\n");
+		TelemetrySetModule(MOD_READ_FAILED, len, load, n, arena_hi);
 		free(patches);
 		f_close(&fp);
 		return;
@@ -1311,10 +1342,17 @@ static void LoadTournamentModule(void)
 		write32(P2C(addr), val);
 	}
 	free(patches);
-	write32(0x34, load);
-	sync_after_write((void*)0x0, 0x40);
-	dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x\r\n",
-		len, load, n, arena_hi, load);
+	if (!arena_unset)
+	{
+		write32(0x34, load);
+		sync_after_write((void*)0x0, 0x40);
+		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x\r\n",
+			len, load, n, arena_hi, load);
+	}
+	else
+		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top unset (game default %08x), FST word %08x\r\n",
+			len, load, n, TMOD_DEFAULT_ARENA_HI, read32(0x38));
+	TelemetrySetModule(MOD_LOADED, len, load, n, arena_hi);
 }
 
 void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
@@ -3608,6 +3646,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	/* Tournament module: after every other patch, Melee 1.02 only. */
 	if (MeleeVersion == MELEE_VERSION_NTSC_2)
 		LoadTournamentModule();
+	else
+		TelemetrySetModule(MOD_NOT_MELEE, 0, 0, 0, read32(0x34));
 
 	PatchState = PATCH_STATE_DONE;
 

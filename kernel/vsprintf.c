@@ -12,6 +12,7 @@
 #include "vsprintf.h"
 #include "Config.h"
 #include "ff_utf8.h"
+#include "Telemetry.h"
 
 #ifdef SLIPPI_DEBUG
 #include "SlippiDebug.h"
@@ -310,7 +311,10 @@ int dbgprintf( const char *fmt, ...)
 {
 	// If no logging is enabled, do nothing.
 	bool enable = (sdhc_log_enabled || slippi_use_port_a || early_gecko_logging);
-	if (enable == false)
+	// Station telemetry (Telemetry.c) keeps a copy of the log for the relay's
+	// status page, within a capture budget, even when nothing else logs.
+	bool capture = TelemetryWantsLog();
+	if (enable == false && capture == false)
 		return 0;
 
 	// Otherwise, regardless of HOW we're logging, we always need to call
@@ -323,6 +327,8 @@ int dbgprintf( const char *fmt, ...)
 	va_start(args, fmt);
 	_vsprintf(buffer, fmt, args);
 	va_end(args);
+
+	TelemetryLog(buffer, strlen(buffer));
 
 	// If the user is logging to a USB Gecko, verify that the EXI bit in
 	// EXICTRL/SRNPROT is enabled, then do the semihosting write.

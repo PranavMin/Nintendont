@@ -52,6 +52,7 @@
 #include "syscalls.h"
 #include "net.h"
 #include "ff_utf8.h"
+#include "Telemetry.h"
 
 /* Game-side contract, melee/src/melee/lb/lbrelayexi.h. */
 #define RELAY_EXI_BUF_SIZE	4096	/* LB_RELAY_EXI_BUF_SIZE */
@@ -67,6 +68,8 @@
 #define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
 #define RELAY_BEACON_SETUP_MS	1000	/* socket/bind failed or network not up yet: try again this often */
 #define RELAY_BEACON_DRAIN_MAX	8	/* datagrams read per poll; beacons come every 2 s */
+#define RELAY_TELEMETRY_TICK_MS	100	/* idle thread sends telemetry this often */
+#define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
  * net_fcntl(): params = {socket, cmd, flags}, ioctl input length 12, no
@@ -113,6 +116,18 @@ static vu32 relay_port = 0;
 static s32 beacon_sock = -1;		/* UDP socket bound to BEACON_PORT, -1 until set up */
 static u32 beacon_ts = 0;		/* HW_TIMER of the last setup attempt or drain */
 static u8 beacon_rx[32] ALIGNED(32);	/* recvfrom target; > sizeof(relay_beacon) so oversize datagrams show */
+
+/* Station telemetry (protocol.yaml telemetry_hdr): the kernel log and the
+ * module's load result, to the relay's TELEMETRY_PORT. Relay thread only. */
+static s32 tele_sock = -1;		/* UDP socket connected to tele_ip:TELEMETRY_PORT */
+static u32 tele_ip = 0;
+static u32 tele_ts = 0;			/* HW_TIMER of the last tick */
+static u32 tele_uptime = 0;		/* ms since RelayEXIInit, summed per tick (HW_TIMER wraps) */
+static u32 tele_status_ms = 0;		/* ms since the last TM_STATUS */
+static bool tele_status_due = true;
+static u32 tele_sent_state = 0xFFFFFFFF;	/* module_state in the last TM_STATUS */
+static u32 tele_seq = 0;
+static u8 tele_buf[sizeof(struct relay_auth) + sizeof(struct telemetry_hdr) + TELEMETRY_TEXT_MAX] ALIGNED(32);
 
 /* EXI transaction being received on the main loop (reset by RelayEXISelect) */
 static u8 exi_cmd = 0;			/* EXI_RELAY_REQ / EXI_RELAY_POLL / 0 */
@@ -492,6 +507,124 @@ static void serviceBeacon(void)
 	}
 }
 
+/* One telemetry datagram: relay_auth + telemetry_hdr + `len` payload bytes,
+ * the payload already at tele_buf + headers. A send error other than "would
+ * block" closes the socket; the next tick reconnects. */
+static bool teleSend(u8 kind, u32 len)
+{
+	struct relay_auth *auth = (struct relay_auth *)tele_buf;
+	struct telemetry_hdr *h = (struct telemetry_hdr *)(tele_buf + sizeof(struct relay_auth));
+	u32 total = sizeof(struct relay_auth) + sizeof(struct telemetry_hdr) + len;
+	s32 res;
+
+	memset(auth, 0, sizeof(*auth));
+	auth->magic[0] = AUTH_MAGIC_0;
+	auth->magic[1] = AUTH_MAGIC_1;
+	memcpy(auth->secret, cfg.secret, SECRET_LEN);
+	h->magic[0] = RELAY_MAGIC_0;
+	h->magic[1] = TELEMETRY_MAGIC_1;
+	h->version = RELAY_PROTO_VERSION;
+	h->kind = kind;
+	h->station = cfg.station;
+	h->len = (u16)len;
+	h->seq = tele_seq;
+	h->uptime_ms = tele_uptime;
+	res = sendto(top_fd, tele_sock, tele_buf, total, 0);
+	if (res == (s32)total)
+	{
+		tele_seq++;
+		return true;
+	}
+	if (res != -RELAY_SO_EAGAIN)
+	{
+		close(top_fd, tele_sock);
+		tele_sock = -1;
+	}
+	return false;
+}
+
+/* Idle-thread duty, after serviceBeacon: once the relay is known, a
+ * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
+ * state changes or the relay moves), and the unsent kernel log in TM_LOG
+ * chunks. Needs tournament.cfg's secret like every request. */
+static void serviceTelemetry(void)
+{
+	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
+	u8 *payload = tele_buf + sizeof(struct relay_auth) + sizeof(struct telemetry_hdr);
+	u32 dt, n, i, state, len, load, patches, arena;
+	s32 sock, flags;
+
+	dt = TimerDiffMs(tele_ts);
+	if (dt < RELAY_TELEMETRY_TICK_MS)
+		return;
+	if (dt == UINT_MAX)
+		dt = RELAY_TELEMETRY_TICK_MS;	/* HW_TIMER wrapped */
+	tele_ts = read32(HW_TIMER);
+	tele_uptime += dt;
+	tele_status_ms += dt;
+
+	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
+		return;
+	if (tele_sock >= 0 && tele_ip != relay_ip)
+	{
+		close(top_fd, tele_sock);
+		tele_sock = -1;
+	}
+	if (tele_sock < 0)
+	{
+		sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
+		if (sock < 0)
+			return;
+		flags = relay_fcntl(sock, RELAY_F_GETFL, 0);
+		if (flags < 0)
+			flags = 0;
+		relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
+		memset(addr, 0, sizeof(*addr));
+		addr->sin_family = AF_INET;
+		addr->sin_port = TELEMETRY_PORT;
+		addr->sin_addr.s_addr = relay_ip;
+		if (connect(top_fd, sock, (struct sockaddr *)addr) < 0)
+		{
+			close(top_fd, sock);
+			return;
+		}
+		tele_sock = sock;
+		tele_ip = relay_ip;
+		tele_status_due = true;
+		dbgprintf("RelayEXI: telemetry to %u.%u.%u.%u:%u\r\n",
+			relay_ip >> 24, (relay_ip >> 16) & 0xFF, (relay_ip >> 8) & 0xFF, relay_ip & 0xFF, TELEMETRY_PORT);
+	}
+
+	TelemetryGetModule(&state, &len, &load, &patches, &arena);
+	if (tele_status_due || state != tele_sent_state || tele_status_ms >= TELEMETRY_STATUS_MS)
+	{
+		struct station_status *st = (struct station_status *)payload;
+		memset(st, 0, sizeof(*st));
+		st->module_state = (u8)state;
+		st->module_patches = (u16)patches;
+		st->module_len = len;
+		st->module_load = load;
+		st->arena_hi = arena;
+		st->log_dropped = TelemetryDropped();
+		if (teleSend(TM_STATUS, sizeof(*st)))
+		{
+			tele_status_due = false;
+			tele_sent_state = state;
+			tele_status_ms = 0;
+		}
+		if (tele_sock < 0)
+			return;
+	}
+
+	for (i = 0; i < RELAY_TELEMETRY_CHUNKS; i++)
+	{
+		n = TelemetryPeek((char *)payload, TELEMETRY_TEXT_MAX);
+		if (n == 0 || !teleSend(TM_LOG, n))
+			break;
+		TelemetryConsume(n);
+	}
+}
+
 static u32 remainingMs(u32 start)
 {
 	u32 elapsed = TimerDiffMs(start);
@@ -620,6 +753,7 @@ static u32 RelayEXIThread(void *arg)
 		if (relay_state != RELAY_BUSY)
 		{
 			serviceBeacon();
+			serviceTelemetry();
 			mdelay(RELAY_THREAD_CYCLE_MS);
 			continue;
 		}
@@ -679,6 +813,7 @@ void RelayEXIInit(void)
 {
 	loadCfg();
 	relay_state = RELAY_IDLE;
+	tele_ts = read32(HW_TIMER);
 
 	RelayEXI_Thread = do_thread_create(
 		RelayEXIThread,
