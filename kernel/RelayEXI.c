@@ -193,7 +193,8 @@ static u32 mb_lba = 0;			/* first mailbox sector on that mount; 0 = not a beamer
 static u32 mb_hello_logged = 0;		/* mount whose missing hello was logged */
 static u32 mb_fw = 0;			/* fw_build of the last valid hello, for the log */
 static u32 mb_ts = 0;			/* HW_TIMER of the last hello read */
-static u32 mb_seq = 0;			/* beamer_req_hdr.seq of the last request */
+static u32 mb_seq = 0;			/* beamer_req_hdr.seq of the last request (serviceBeamer seeds it) */
+static u32 mb_seq_mount = 0;		/* mount mb_seq was seeded on */
 static u32 mb_tele_seq = 0;		/* beamer_tele_hdr.seq of the last datagram */
 static u8 mb_buf[BEAMER_MB_RESP_SECTORS * BEAMER_SECTOR_SIZE] ALIGNED(32);	/* every mailbox read and write */
 
@@ -1104,18 +1105,26 @@ static u32 beamerMailbox(void)
  * hello sector. A valid one (magic, BEAMER_MB_VERSION) makes the mailbox
  * writable and gives the relay address for exi_poll_hdr (0 until the beamer
  * has heard the beacon, BF_RELAY); anything else - no drive, no FAT32
- * partition, a USB error, an ordinary stick - is PF_NO_BEAMER. */
+ * partition, a USB error, an ordinary stick - is PF_NO_BEAMER.
+ * Finding the beamer (the first valid hello, and again on a new USB mount)
+ * also reads the response sector: the beamer outlives a Wii reboot and keeps
+ * its last response, so the next request seq starts one past that one
+ * (protocol.yaml beamer_req_hdr), or at 1 when the sector holds none. */
 static void serviceBeamer(void)
 {
 	const struct beamer_hello *h = (const struct beamer_hello *)mb_buf;
+	const struct beamer_resp_hdr *r = (const struct beamer_resp_hdr *)(mb_buf + BEAMER_SECTOR_SIZE);
 	u32 mount, ip, port;
+	bool found;
 
 	if (!beamer_usb || TimerDiffMs(mb_ts) < RELAY_BEAMER_HELLO_MS)
 		return;
 	mb_ts = read32(HW_TIMER);
 	mount = beamerMailbox();
+	found = !beamer_up || mount != mb_seq_mount;
 	if (mount == 0 || !USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_HELLO, 1, mb_buf) ||
-	    memcmp(h->magic, "LAZYTOMB", sizeof(h->magic)) != 0 || h->version != BEAMER_MB_VERSION)
+	    memcmp(h->magic, "LAZYTOMB", sizeof(h->magic)) != 0 || h->version != BEAMER_MB_VERSION ||
+	    (found && !USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf + BEAMER_SECTOR_SIZE)))
 	{
 		if (beamer_up)
 			dbgprintf("RelayEXI: beamer lost\r\n");
@@ -1138,6 +1147,12 @@ static void serviceBeamer(void)
 			ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port);
 	relay_port = port;
 	relay_ip = ip;
+	if (found)
+	{
+		mb_seq = (r->magic[0] == RELAY_MAGIC_0 && r->magic[1] == 'R') ? r->seq : 0;
+		mb_seq_mount = mount;
+		dbgprintf("RelayEXI: beamer found, next request seq %u\r\n", mb_seq + 1);
+	}
 	beamer_up = 1;
 }
 

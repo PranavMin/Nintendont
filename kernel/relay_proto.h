@@ -548,7 +548,7 @@ RELAY_STATIC_ASSERT(offsetof(struct beamer_hello, fw_build) == 20, beamer_hello_
 struct beamer_req_hdr {
     uint8_t  magic[2];  /* 'M','Q' */
     uint16_t _pad;
-    uint32_t seq;  /* nonzero; the kernel counts up from 1 at boot */
+    uint32_t seq;  /* nonzero; counts up by one per request. The beamer stays powered across Wii reboots and keeps its last response, so whenever the kernel finds the beamer (first valid beamer_hello after boot or a USB change) it starts one past the seq in the response sector (or at 1 if that is 0) */
     uint16_t len;  /* bytes after this header, at most BEAMER_SECTOR_SIZE - 12 */
     uint16_t _pad2;
 };  /* 12 bytes */
