@@ -1265,6 +1265,11 @@ static void TModReadback(const char *when, u32 load, u32 len)
 	dbgprintf("TMOD:RAM %s: first %08x, sum %08x\r\n", when, read32(P2C(load)), sum);
 }
 
+/* MEM2 staging copy of the module for FakeEntryLoad's PPC-side copy
+ * (32-byte aligned; kept for the life of the kernel). */
+static u8 *tmod_stage = NULL;
+static u32 tmod_stage_len = 0;
+
 static void LoadTournamentModule(void)
 {
 	FIL fp;
@@ -1365,6 +1370,20 @@ static void LoadTournamentModule(void)
 		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top unset (game default %08x), FST word %08x\r\n",
 			len, load, n, TMOD_DEFAULT_ARENA_HI, read32(0x38));
 	TModReadback("after load", load, len);
+	tmod_stage_len = (len + 31) & ~31;
+	if (tmod_stage == NULL)
+	{
+		u8 *raw = malloc(tmod_stage_len + 32);
+		tmod_stage = raw ? (u8*)(((u32)raw + 31) & ~31) : NULL;
+	}
+	if (tmod_stage)
+	{
+		memset(tmod_stage, 0, tmod_stage_len);
+		memcpy(tmod_stage, (void*)P2C(load), len);
+		sync_after_write(tmod_stage, tmod_stage_len);
+	}
+	else
+		dbgprintf("TMOD:no MEM2 for the staging copy; the PPC will run the ARM-written image\r\n");
 	TelemetrySetModule(MOD_LOADED, len, load, n, arena_hi);
 }
 
@@ -4112,6 +4131,7 @@ void SetIPL_TRI()
  * wrote outside the DOL range (0 lines = none). */
 #define MOD_FLUSH_ADDR (RESET_STATUS+0xC)
 #define MOD_FLUSH_LEN (RESET_STATUS+0x10)
+#define MOD_SRC (RESET_STATUS+0x14)	/* uncached PPC address of the MEM2 staging copy */
 void PatchGame()
 {
 	if (Datel && (AppLoaderSize != 0))
@@ -4185,18 +4205,23 @@ void PatchGame()
 	{
 		u32 mstate, mlen, mload, mpatches, marena;
 		TelemetryGetModule(&mstate, &mlen, &mload, &mpatches, &marena);
-		if (mstate == MOD_LOADED)
+		if (mstate == MOD_LOADED && tmod_stage)
 		{
-			u32 start = mload & ~31;
-			write32(MOD_FLUSH_ADDR, start | 0x80000000);
-			write32(MOD_FLUSH_LEN, (mload + mlen - start + 31) >> 5);
-			dbgprintf("TMOD:PPC caches invalidated over %08x, %u lines\r\n", start, (mload + mlen - start + 31) >> 5);
+			/* mload is 32-byte aligned (header check) so the staging copy
+			 * and the destination line up. PPC uncached MEM2 = ARM + 0xC0000000
+			 * (0x13003420 is 0xD3003420 to the PPC). */
+			u32 lines = tmod_stage_len >> 5;
+			write32(MOD_FLUSH_ADDR, mload | 0x80000000);
+			write32(MOD_FLUSH_LEN, lines);
+			write32(MOD_SRC, (u32)tmod_stage + 0xC0000000);
+			dbgprintf("TMOD:PPC copies %u lines from %08x to %08x at entry\r\n", lines, (u32)tmod_stage + 0xC0000000, mload);
 			TModReadback("before entry", mload, mlen);
 		}
 		else
 		{
 			write32(MOD_FLUSH_ADDR, 0);
 			write32(MOD_FLUSH_LEN, 0);
+			write32(MOD_SRC, 0);
 		}
 	}
 	dbgprintf("Jumping to 0x%08X\n", GameEntry);

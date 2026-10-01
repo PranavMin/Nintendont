@@ -5,6 +5,7 @@
 .set	FLUSH_ADDR,		0xD3003428
 .set	MOD_FLUSH_ADDR,	0xD300342C
 .set	MOD_FLUSH_LEN,	0xD3003430
+.set	MOD_SRC,		0xD3003434
 
 FakeEntryLoad:
 	lis		r3,	RESET_STATUS@h
@@ -26,21 +27,44 @@ InvalidateRange1:
 	addi	r4,	r4,	0x20
 	bdnz	InvalidateRange1
 
-	# The tournament module (kernel Patch.c LoadTournamentModule) is written
-	# by the ARM outside the DOL range, so the PPC still holds stale lines for
-	# it (zeros from multidol RAMInit): first hardware run, 2026-09-30,
-	# "Illegal instruction at 817E88D8". The kernel passes its range here;
-	# 0 lines = no module.
+	# The tournament module (kernel Patch.c LoadTournamentModule) lives
+	# outside the DOL range. The ARM writing it straight into MEM1 left the
+	# PPC executing stale cache lines (zeros from multidol RAMInit: "Illegal
+	# instruction at 817E88D8" on the first hardware runs, 2026-09-30, even
+	# after a dcbi/icbi pass here). So the PPC now copies it itself from an
+	# uncached MEM2 staging copy the kernel keeps, through its own caches,
+	# flushing each line - the same path every other PPC-written byte takes.
+	# MOD_FLUSH_LEN is the line count (0 = no module), MOD_FLUSH_ADDR the
+	# cached destination, MOD_SRC the uncached source.
 	lwz		r4,	MOD_FLUSH_LEN@l(r3)
 	cmpwi	r4,	0
 	beq		NoModule
 	mtctr	r4
 	lwz		r4,	MOD_FLUSH_ADDR@l(r3)
-InvalidateModule:
-	dcbi	0,	r4
+	lwz		r5,	MOD_SRC@l(r3)
+CopyModule:
+	lwz		r0,	0(r5)
+	lwz		r6,	4(r5)
+	lwz		r7,	8(r5)
+	lwz		r8,	12(r5)
+	lwz		r9,	16(r5)
+	lwz		r10,	20(r5)
+	lwz		r11,	24(r5)
+	lwz		r12,	28(r5)
+	stw		r0,	0(r4)
+	stw		r6,	4(r4)
+	stw		r7,	8(r4)
+	stw		r8,	12(r4)
+	stw		r9,	16(r4)
+	stw		r10,	20(r4)
+	stw		r11,	24(r4)
+	stw		r12,	28(r4)
+	dcbf	0,	r4
 	icbi	0,	r4
 	addi	r4,	r4,	0x20
-	bdnz	InvalidateModule
+	addi	r5,	r5,	0x20
+	bdnz	CopyModule
+	sync
 NoModule:
 
 	li		r4,	0x100

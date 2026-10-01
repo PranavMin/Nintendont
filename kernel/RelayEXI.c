@@ -547,6 +547,29 @@ static bool teleSend(u8 kind, u32 len)
  * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
  * state changes or the relay moves), and the unsent kernel log in TM_LOG
  * chunks. Needs tournament.cfg's secret like every request. */
+/* Module integrity watch: once a second for the first minute after the module
+ * is loaded, the ARM reads the module back from MEM1 and logs the first word
+ * and word sum whenever they change (and once at the start). A crash whose
+ * log then still shows the right sum means the PPC ran stale cache, not
+ * overwritten memory. */
+static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
+
+static void watchModule(u32 state, u32 load, u32 len)
+{
+	u32 i, sum = 0, first;
+	if (state != MOD_LOADED || tmod_watch_n > 60 || tele_uptime - tmod_watch_ms < 1000)
+		return;
+	tmod_watch_ms = tele_uptime;
+	sync_before_read((void*)P2C(load), (len + 31) & ~31);
+	first = read32(P2C(load));
+	for (i = 0; i + 4 <= len; i += 4)
+		sum += read32(P2C(load) + i);
+	if (tmod_watch_n == 0 || sum != tmod_watch_sum)
+		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x\r\n", tmod_watch_n, tele_uptime, first, sum);
+	tmod_watch_sum = sum;
+	tmod_watch_n++;
+}
+
 static void serviceTelemetry(void)
 {
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
@@ -562,6 +585,9 @@ static void serviceTelemetry(void)
 	tele_ts = read32(HW_TIMER);
 	tele_uptime += dt;
 	tele_status_ms += dt;
+
+	TelemetryGetModule(&state, &len, &load, &patches, &arena);
+	watchModule(state, load, len);
 
 	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
 		return;
@@ -595,7 +621,6 @@ static void serviceTelemetry(void)
 			relay_ip >> 24, (relay_ip >> 16) & 0xFF, (relay_ip >> 8) & 0xFF, relay_ip & 0xFF, TELEMETRY_PORT);
 	}
 
-	TelemetryGetModule(&state, &len, &load, &patches, &arena);
 	if (tele_status_due || state != tele_sent_state || tele_status_ms >= TELEMETRY_STATUS_MS)
 	{
 		struct station_status *st = (struct station_status *)payload;
