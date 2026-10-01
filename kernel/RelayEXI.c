@@ -129,6 +129,15 @@ static u32 tele_sent_state = 0xFFFFFFFF;	/* module_state in the last TM_STATUS *
 static u32 tele_seq = 0;
 static u8 tele_buf[sizeof(struct relay_auth) + sizeof(struct telemetry_hdr) + TELEMETRY_TEXT_MAX] ALIGNED(32);
 
+/* Crash mailbox (protocol.yaml crash_mailbox): the game's module writes a
+ * crash_report here from its OS error handler; CRASH_MAILBOX_PPC is the PPC's
+ * uncached view of this ARM address (PPC = ARM + 0xC0000000). Zeroed and
+ * stamped with CRASH_MAGIC at init so the module knows it may write. */
+#define CRASH_MAILBOX_ARM	(CRASH_MAILBOX_PPC - 0xC0000000)
+static u32 crash_seen_seq = 0;		/* last seq logged */
+static u32 crash_send_seq = 0;		/* last seq sent as TM_CRASH */
+static struct crash_report crash_copy ALIGNED(32);
+
 /* EXI transaction being received on the main loop (reset by RelayEXISelect) */
 static u8 exi_cmd = 0;			/* EXI_RELAY_REQ / EXI_RELAY_POLL / 0 */
 static bool exi_dispatched = false;	/* REQ already handed off; ignore trailing bytes */
@@ -570,6 +579,29 @@ static void watchModule(u32 state, u32 load, u32 len)
 	tmod_watch_n++;
 }
 
+/* Log a new crash report as soon as the module writes one (network or not),
+ * and remember it for TM_CRASH. */
+static void watchCrash(void)
+{
+	volatile struct crash_mailbox *mb = (volatile struct crash_mailbox *)CRASH_MAILBOX_ARM;
+	u32 seq, i;
+
+	if (mb->magic != CRASH_MAGIC)
+		return;
+	seq = mb->seq;
+	if (seq == crash_seen_seq)
+		return;
+	memcpy(&crash_copy, (const void *)&mb->report, sizeof(crash_copy));
+	crash_seen_seq = seq;
+	dbgprintf("TMOD:CRASH #%u error %u at %08x srr1 %08x lr %08x sp %08x dsisr %08x dar %08x\r\n",
+		crash_copy.count, crash_copy.error, crash_copy.srr0, crash_copy.srr1, crash_copy.lr,
+		crash_copy.sp, crash_copy.dsisr, crash_copy.dar);
+	dbgprintf("TMOD:CRASH words at srr0: %08x %08x %08x %08x\r\n",
+		crash_copy.fetched[0], crash_copy.fetched[1], crash_copy.fetched[2], crash_copy.fetched[3]);
+	for (i = 0; i < CRASH_STACK_DEPTH && crash_copy.stack[i]; i++)
+		dbgprintf("TMOD:CRASH stack[%u] %08x\r\n", i, crash_copy.stack[i]);
+}
+
 static void serviceTelemetry(void)
 {
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
@@ -588,6 +620,7 @@ static void serviceTelemetry(void)
 
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
 	watchModule(state, load, len);
+	watchCrash();
 
 	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
 		return;
@@ -637,6 +670,15 @@ static void serviceTelemetry(void)
 			tele_sent_state = state;
 			tele_status_ms = 0;
 		}
+		if (tele_sock < 0)
+			return;
+	}
+
+	if (crash_send_seq != crash_seen_seq)
+	{
+		memcpy(payload, &crash_copy, sizeof(crash_copy));
+		if (teleSend(TM_CRASH, sizeof(crash_copy)))
+			crash_send_seq = crash_seen_seq;
 		if (tele_sock < 0)
 			return;
 	}
@@ -839,6 +881,12 @@ void RelayEXIInit(void)
 	loadCfg();
 	relay_state = RELAY_IDLE;
 	tele_ts = read32(HW_TIMER);
+	{
+		/* Hand the module its crash mailbox: zero, then the magic. */
+		volatile struct crash_mailbox *mb = (volatile struct crash_mailbox *)CRASH_MAILBOX_ARM;
+		memset((void *)mb, 0, sizeof(*mb));
+		mb->magic = CRASH_MAGIC;
+	}
 
 	RelayEXI_Thread = do_thread_create(
 		RelayEXIThread,
