@@ -4,7 +4,7 @@ This is the [LazyTO](https://github.com/PranavMin/lazyto) fork of
 [Slippi Nintendont](https://github.com/project-slippi/Nintendont). LazyTO lets players at a
 Melee weekly pick, play and report their start.gg sets from the Wii itself.
 
-**What this fork adds** (branch `vanilla-module`):
+**What this fork adds** (branch `lazyto`):
 
 - **Relay EXI device** (`kernel/RelayEXI.c`): the game's requests go over the Wii's network to
   the LazyTO relay, and the answers come back through EXI.
