@@ -48,10 +48,10 @@ jobs:
         run: |
           mkdir artifact
           cp ./loader/loader.* ./artifact/
-          mkdir -p "release-artifact/apps/Slippi Nintendont"
-          cp ./loader/loader.dol "./release-artifact/apps/Slippi Nintendont/boot.dol"
-          cp ./nintendont/{icon.png,meta.xml} "./release-artifact/apps/Slippi Nintendont/"
-          pushd "./release-artifact/apps/Slippi Nintendont/"
+          mkdir -p "release-artifact/apps/Kegstand Tournament Mod"
+          cp ./loader/loader.dol "./release-artifact/apps/Kegstand Tournament Mod/boot.dol"
+          cp ./nintendont/{icon.png,meta.xml} "./release-artifact/apps/Kegstand Tournament Mod/"
+          pushd "./release-artifact/apps/Kegstand Tournament Mod/"
           sed -i -e s/\<version\>/\<version\>${{ env.NIN_VERSION }}/ meta.xml
           sed -i -e s/\<release_date\>/\<release_date\>${{ env.CURR_TIMESTAMP }}/ meta.xml
           sed -i -e s/\<git_hash\>/\<git_hash\>${{ env.GIT_HASH }}/ meta.xml
