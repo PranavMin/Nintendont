@@ -1,6 +1,6 @@
 # LazyTO — Nintendont
 
-This is the [LazyTO](https://github.com/PranavMin/tournament-reporter) fork of
+This is the [LazyTO](https://github.com/PranavMin/lazyto) fork of
 [Slippi Nintendont](https://github.com/project-slippi/Nintendont). LazyTO lets players at a
 Melee weekly pick, play and report their start.gg sets from the Wii itself.
 
@@ -16,12 +16,12 @@ Melee weekly pick, play and report their start.gg sets from the Wii itself.
 
 Use the CI-built loader from GitHub Actions. A locally built loader fails at "Preparing IOS58
 Kernel". Venue setup is in
-[tournament-reporter/docs/wii-setup.md](https://github.com/PranavMin/tournament-reporter/blob/main/docs/wii-setup.md);
+[lazyto/docs/wii-setup.md](https://github.com/PranavMin/lazyto/blob/main/docs/wii-setup.md);
 the relay device design is in [docs/relay-exi-report.md](docs/relay-exi-report.md).
 
 | LazyTO repo | Role |
 |---|---|
-| [tournament-reporter](https://github.com/PranavMin/tournament-reporter) | Relay on the venue's Raspberry Pi; design docs and setup guides |
+| [lazyto](https://github.com/PranavMin/lazyto) | Relay on the venue's Raspberry Pi; design docs and setup guides |
 | [melee](https://github.com/PranavMin/melee) | `tournament.bin`, the kiosk module |
 | **Nintendont** (this repo) | Wii loader |
 | [Ishiiruka](https://github.com/PranavMin/Ishiiruka) | Slippi Dolphin with the relay forwarder, for development |
