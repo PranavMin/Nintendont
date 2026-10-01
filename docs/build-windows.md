@@ -105,8 +105,14 @@ layout matches devkitPro's own Windows installer.
 
    `ecrti.o`, `crtbegin.o`, `crtend.o`, `ecrtn.o`, `libsysbase` and newlib still come from
    devkitPPC r50. This mix (GCC 16, newlib 4.6, libogc 2.14.1) is **not** what CI ships; the
-   loader it produces links but has not been run on a Wii. For a release-equivalent loader use
-   the CI Docker image; for kernel work only the kernel steps below matter.
+   loader it produces links but **does not work on a Wii**: first hardware run 2026-09-30 stopped
+   at "Preparing IOS58 Kernel" with `Failed to load IOS58 from NAND: ES_GetStoredTMDSize()
+   returned -4352` on a Wii whose stock Nintendont runs fine. -4352 is libogc's `ES_ENOTINIT`
+   (ES never opened), not a missing IOS58 - the startup path differs from the real toolchain.
+   **Ship only CI-built loaders:** on the fork, `gh workflow run build.yml --ref vanilla-module`
+   (Actions enabled 2026-09-30), then `gh run download` the `release-*` artifact; its
+   `apps/Slippi Nintendont/boot.dol` goes on the SD card. The local build stays useful for
+   compiling the kernel (`kernel/kernel.bin`) and checking it builds.
 
 ## 2. Build
 
