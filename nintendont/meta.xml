@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="ISO-8859-1" standalone="yes"?>
 <app version="1">
-	<name>Kegstand's Tournament Mod</name>
-	<coder>Kegstand; Slippi Nintendont by FIX94, crediar, Fizzi, meta, Nicolet, nikki</coder>
+	<name>LazyTO</name>
+	<coder>Kegstand (LazyTO); Slippi Nintendont by FIX94, crediar, Fizzi, meta, Nicolet, nikki</coder>
 	<version></version>
 	<release_date></release_date>
 	<git_hash></git_hash>
-	<short_description>Melee tournament kiosk</short_description>
-	<long_description>Slippi Nintendont with the tournament kiosk: boots Melee into a start.gg set list, scores games automatically and reports them through the venue relay.
+	<short_description>LazyTO - Melee tournament kiosk</short_description>
+	<long_description>LazyTO: Slippi Nintendont with the tournament kiosk. Boots Melee into a start.gg set list, scores games automatically and reports them through the venue relay.
 Needs sd:/tournament.bin and sd:/tournament.cfg.
 Built on Slippi Nintendont (https://github.com/project-slippi/Nintendont).</long_description>
 	<no_ios_reload/>

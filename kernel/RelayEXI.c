@@ -391,6 +391,11 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 	{
 		struct exi_poll_hdr *ph = (struct exi_poll_hdr *)poll_image;
 		ph->state = (u8)relay_state;
+		/* What this host already knows is wrong (exi_poll_flags), so the
+		 * kiosk can say "no network" instead of waiting for a beacon. */
+		ph->flags = (NetworkStarted ? 0 : PF_NO_NETWORK)
+			| (cfg.ok ? 0 : PF_NO_CFG)
+			| (cfg.has_secret ? 0 : PF_NO_SECRET);
 		ph->station = cfg.station;
 		ph->relay_ip = relay_ip;		/* 0 until a beacon is heard */
 		ph->relay_port = (u16)relay_port;

@@ -1,4 +1,4 @@
-# Placeholder Homebrew Channel icon for Kegstand's Tournament Mod (128x48 PNG).
+# Homebrew Channel icon for LazyTO (128x48 PNG).
 # Kiosk look: rounded navy panel, light-blue rim, bold italic lettering with a
 # drop shadow (the TOURNAMENT wordmark's font, Franklin Gothic Medium).
 # Drawn at 4x and downscaled for clean antialiasing.
@@ -49,8 +49,8 @@ function Text([string]$str, [float]$px, [float]$cy, [System.Drawing.Color]$c) {
     $g.DrawString($str, $font, (New-Object System.Drawing.SolidBrush $c), $r, $fmt)
 }
 
-Text "KEGSTAND'S" 19 19 ([System.Drawing.Color]::White)
-Text "TOURNAMENT MOD" 9.5 36 ([System.Drawing.Color]::FromArgb(255, 150, 190, 255))
+Text "LazyTO" 24 19 ([System.Drawing.Color]::White)
+Text "MELEE TOURNAMENT KIOSK" 8.5 37 ([System.Drawing.Color]::FromArgb(255, 150, 190, 255))
 
 $small = New-Object System.Drawing.Bitmap $W, $H, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $gs = [System.Drawing.Graphics]::FromImage($small)
