@@ -1,6 +1,6 @@
 # RelayEXI report (session 8)
 
-> Written on branch `reporter`; the current branch is `lazyto`. Section 4 is superseded
+> Written on branch `reporter`; the current branch is `LazyTO`. Section 4 is superseded
 > and kept, marked, for history.
 
 What was built on branch `reporter` for `../tournament-reporter/docs/architecture.md` section 6.2,

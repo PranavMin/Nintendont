@@ -1,6 +1,6 @@
 # Building Slippi Nintendont on Windows
 
-Recipe for branch `lazyto` (named `vanilla-module` until 2026-10-01) (kernel + loader; first used 2026-09-22 on the old branch `reporter`). CI builds in the
+Recipe for branch `LazyTO` (named `vanilla-module` until 2026-10-01) (kernel + loader; first used 2026-09-22 on the old branch `reporter`). CI builds in the
 `nikhilnarayana/devkitpro-slippi` Docker image (`.github/workflows/build.yml`); this is the
 native equivalent with devkitPro's pacman inside MSYS2, installed under `C:\devkitPro` so the
 layout matches devkitPro's own Windows installer.
@@ -122,7 +122,7 @@ embedded), and that loader must come from CI (see the IOS58 note below).
    at "Preparing IOS58 Kernel" with `Failed to load IOS58 from NAND: ES_GetStoredTMDSize()
    returned -4352` on a Wii whose stock Nintendont runs fine. -4352 is libogc's `ES_ENOTINIT`
    (ES never opened), not a missing IOS58 - the startup path differs from the real toolchain.
-   **Ship only CI-built loaders:** on the fork, `gh workflow run build.yml --ref lazyto`
+   **Ship only CI-built loaders:** on the fork, `gh workflow run build.yml --ref LazyTO`
    (Actions enabled 2026-09-30), then `gh run download` the `release-*` artifact; its
    `apps/Slippi Nintendont/boot.dol` goes on the SD card. The local build stays useful for
    compiling the kernel (`kernel/kernel.bin`) and checking it builds.
