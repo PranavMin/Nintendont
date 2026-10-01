@@ -25,6 +25,8 @@ the relay device design is in [docs/relay-exi-report.md](docs/relay-exi-report.m
 | [melee](https://github.com/PranavMin/melee) | `tournament.bin`, the kiosk module |
 | **Nintendont** (this repo) | Wii loader |
 
+Licence: GNU General Public License, version 2, like Nintendont itself; see [COPYING](COPYING).
+
 Upstream is merged periodically from `project-slippi/Nintendont` `slippi`. Upstream's README follows.
 
 ---
