@@ -15,8 +15,31 @@
 #include "global.h"
 #include "apploader.h"
 
+/* Top of MEM1, where the kernel puts the tournament module (sd:/tournament.bin,
+ * linked at 0x817E0000; kernel/Patch.c LoadTournamentModule) and where the
+ * game's FST lands. */
+#define TOP_MEM1_START	0x81700000
+#define TOP_MEM1_END	0x81800000
+
 u32 _main()
 {
+	u32 entry, a;
+
 	RAMInit();
-	return Apploader_Run();
+	entry = Apploader_Run();
+
+	/* RAMInit zeroed this range through the PPC caches, then the ARM kernel
+	 * wrote the module straight into RAM while the apploader ran. The PPC
+	 * still held the stale zero lines (L1, and the unified L2 that an
+	 * instruction fetch refills from), so the first call into the module
+	 * executed zeros: "Illegal instruction at 817E88D8", the first
+	 * instruction of tm_bootOnLoad, on the first hardware run (2026-09-30).
+	 * dcbf writes back anything the apploader really changed here (the FST,
+	 * BI2) and drops the rest; icbi drops stale instructions. The DOL itself
+	 * never had the problem: the apploader's DVD reads invalidate it. */
+	for (a = TOP_MEM1_START; a < TOP_MEM1_END; a += 32)
+		asm volatile("dcbf 0,%0 ; icbi 0,%0" : : "b"(a) : "memory");
+	asm volatile("sync ; isync");
+
+	return entry;
 }
