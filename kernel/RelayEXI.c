@@ -805,8 +805,7 @@ static const char *doRoundTrip(u32 start)
 	sock = socket(top_fd, AF_INET, SOCK_STREAM, IPPROTO_IP);
 	if (sock < 0)
 	{
-		dbgprintf("RelayEXI: socket() returned %d
-", sock);
+		dbgprintf("RelayEXI: socket() returned %d\r\n", sock);
 		return "socket";
 	}
 
@@ -827,8 +826,7 @@ static const char *doRoundTrip(u32 start)
 		/* Seen on hardware 2026-09-30: two REPORT_SCOREs failed here within
 		 * 25 ms while the relay was up; the IOS code tells Wi-Fi drop from
 		 * socket exhaustion from a refused port. */
-		dbgprintf("RelayEXI: connect() to %u.%u.%u.%u:%u returned %d (socket %d)
-",
+		dbgprintf("RelayEXI: connect() to %u.%u.%u.%u:%u returned %d (socket %d)\r\n",
 			ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port, res, sock);
 		fail = "connect";
 	}
