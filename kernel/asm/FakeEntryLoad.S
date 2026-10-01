@@ -42,6 +42,23 @@ InvalidateRange1:
 	mtctr	r4
 	lwz		r4,	MOD_FLUSH_ADDR@l(r3)
 	lwz		r5,	MOD_SRC@l(r3)
+
+	# BootInfo arenaHi (0x80000034) must end the game's heap BELOW the module,
+	# and only the PPC can do it: the apploader wrote it (the FST base,
+	# 0x817F8AC0 on Melee) through the PPC data cache, so the ARM kernel read a
+	# stale 0 and its own write would have been buried by that dirty line.
+	# Melee's heap setup then zeroed the module one second after entry (RAM
+	# watch, 2026-09-30). Lower it to the module base when it is above it;
+	# leave 0 alone (OSInit then uses its 0x81700000 default, also below).
+	lis		r6,	0x8000
+	lwz		r7,	0x34(r6)
+	cmplw	r7,	r4
+	ble		ArenaDone
+	stw		r4,	0x34(r6)
+	addi	r7,	r6,	0x20
+	dcbf	0,	r7
+	sync
+ArenaDone:
 CopyModule:
 	lwz		r0,	0(r5)
 	lwz		r6,	4(r5)
