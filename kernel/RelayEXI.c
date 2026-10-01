@@ -57,7 +57,7 @@
 
 /* Game-side contract, melee/src/melee/lb/lbrelayexi.h. */
 #define RELAY_EXI_BUF_SIZE	4096	/* LB_RELAY_EXI_BUF_SIZE */
-#define RELAY_EXI_MAX_PAYLOAD	28	/* LB_RELAY_EXI_MAX_PAYLOAD */
+#define RELAY_EXI_MAX_PAYLOAD	48	/* LB_RELAY_EXI_MAX_PAYLOAD: report_score_req / end_set_req with 8-byte game_result */
 #define RELAY_REQ_MAX		(sizeof(struct relay_hdr) + RELAY_EXI_MAX_PAYLOAD)
 #define RELAY_RESP_MAX		(RELAY_EXI_BUF_SIZE - sizeof(struct exi_poll_hdr))	/* after the poll header */
 
