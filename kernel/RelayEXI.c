@@ -804,7 +804,11 @@ static const char *doRoundTrip(u32 start)
 
 	sock = socket(top_fd, AF_INET, SOCK_STREAM, IPPROTO_IP);
 	if (sock < 0)
+	{
+		dbgprintf("RelayEXI: socket() returned %d
+", sock);
 		return "socket";
+	}
 
 	/* R9: connect() has no timeout in this kernel, so make the socket
 	 * non-blocking and wait for writability with the same deadline. */
@@ -819,7 +823,15 @@ static const char *doRoundTrip(u32 start)
 	addr->sin_addr.s_addr = ip;
 	res = connect(top_fd, sock, (struct sockaddr *)addr);
 	if (res < 0 && res != -RELAY_SO_EINPROGRESS && res != -RELAY_SO_EAGAIN && res != -RELAY_SO_EALREADY)
+	{
+		/* Seen on hardware 2026-09-30: two REPORT_SCOREs failed here within
+		 * 25 ms while the relay was up; the IOS code tells Wi-Fi drop from
+		 * socket exhaustion from a refused port. */
+		dbgprintf("RelayEXI: connect() to %u.%u.%u.%u:%u returned %d (socket %d)
+",
+			ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port, res, sock);
 		fail = "connect";
+	}
 	else if (res < 0)
 	{
 		pfd[0].socket = sock;
