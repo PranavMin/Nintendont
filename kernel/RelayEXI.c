@@ -597,36 +597,10 @@ static bool teleSend(u8 kind, u32 len)
  * log then still shows the right sum means the PPC ran stale cache, not
  * overwritten memory. */
 static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
-static u32 exi_diag_ms = 0, exi_diag_n = 0;
-extern bool EXI_IRQ;
-
-/* Once a second for the first minute after the module is loaded: the EXI
- * command mailbox the game's patched EXI stubs spin on (EXI_CMD_0 != 0 means
- * the game is waiting for an ack the kernel has not given), the pending IRQ
- * flag, and the relay device's own state. */
-static void exiDiag(u32 state)
-{
-	if (state != MOD_LOADED || exi_diag_n > 60 || tele_uptime - exi_diag_ms < 1000)
-		return;
-	exi_diag_ms = tele_uptime;
-	exi_diag_n++;
-	sync_before_read((void*)EXI_BASE, 0x20);
-	dbgprintf("TMOD:exi at %u ms: cmd0 %08x cmd1 %08x irq %u relay_state %u exi_cmd %02x staged %u\r\n",
-		tele_uptime, read32(EXI_CMD_0), read32(EXI_CMD_1), EXI_IRQ ? 1 : 0,
-		relay_state, exi_cmd, stage_len);
-}
-/* Per-line sums of the last sample, to report WHICH part changed. */
-#define TMOD_WATCH_LINES 4096
-static u32 tmod_line_sum[TMOD_WATCH_LINES];
-
-/* Melee 1.02 globals the game's arena is kept in (config/GALE01/symbols.txt). */
-#define MELEE_OS_ARENA_LO 0x4D5C10	/* __OSArenaLo (PPC 0x804D5C10) */
-#define MELEE_OS_ARENA_HI 0x4D7370	/* __OSArenaHi (PPC 0x804D7370) */
-
 static void watchModule(u32 state, u32 load, u32 len)
 {
 	u32 i, sum = 0, first, lines, lo = 0xFFFFFFFF, hi = 0, changed = 0;
-	if (state != MOD_LOADED || tmod_watch_n > 150 || tele_uptime - tmod_watch_ms < 200)
+	if (state != MOD_LOADED || tmod_watch_n > 60 || tele_uptime - tmod_watch_ms < 1000)
 		return;
 	tmod_watch_ms = tele_uptime;
 	lines = (len + 31) >> 5;
@@ -648,20 +622,16 @@ static void watchModule(u32 state, u32 load, u32 len)
 		}
 		tmod_line_sum[i] = ls;
 	}
+	/* Only the module region is invalidated and read here. Never touch low
+	 * memory or the EXI mailbox from this thread: an ARM cache invalidate
+	 * racing the EXI handler's write + flush of an ack or an interrupt cause
+	 * word drops it, and the PPC then spins forever in its EXI stub - the
+	 * intermittent black screen at launch seen 2026-09-30 while a boot-word
+	 * dump lived here. */
 	if (tmod_watch_n == 0 || sum != tmod_watch_sum)
-	{
-		u32 alo, ahi;
-		sync_before_read((void*)0x0, 0x40);
-		sync_before_read((void*)(MELEE_OS_ARENA_LO & ~31), 32);
-		sync_before_read((void*)(MELEE_OS_ARENA_HI & ~31), 32);
-		alo = read32(MELEE_OS_ARENA_LO);
-		ahi = read32(MELEE_OS_ARENA_HI);
 		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x; %u lines changed, %08x..%08x\r\n",
 			tmod_watch_n, tele_uptime, first, sum, changed,
 			changed ? load + (lo << 5) : 0, changed ? load + (hi << 5) + 31 : 0);
-		dbgprintf("TMOD:game arena lo %08x hi %08x; boot words 30 %08x 34 %08x 38 %08x 3c %08x f0 %08x f4 %08x\r\n",
-			alo, ahi, read32(0x30), read32(0x34), read32(0x38), read32(0x3C), read32(0xF0), read32(0xF4));
-	}
 	tmod_watch_sum = sum;
 	tmod_watch_n++;
 }
@@ -708,7 +678,6 @@ static void serviceTelemetry(void)
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
 	watchModule(state, load, len);
 	watchCrash();
-	exiDiag(state);
 
 	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
 		return;
