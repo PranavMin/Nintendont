@@ -276,11 +276,18 @@ static void loadCfg(void)
 /* ------------------------------------------------------------------------- */
 /* EXI hooks: kernel main loop, never block                                  */
 
+static u32 trace_select = 0, trace_imm = 0, trace_dma = 0;	/* first-N traces of the EXI hooks */
+
 void RelayEXISelect(void)
 {
 	exi_cmd = 0;
 	exi_dispatched = false;
 	stage_len = 0;
+	if (trace_select < 3)
+	{
+		trace_select++;
+		dbgprintf("RelayEXI: slot B selected (#%u)\r\n", trace_select);
+	}
 }
 
 /* Hand the staged request to the thread. Main loop context. */
@@ -313,7 +320,17 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 			exi_cmd = cmd;
 			exi_dispatched = false;
 			stage_len = 0;
+			if (trace_imm < 6)
+			{
+				trace_imm++;
+				dbgprintf("RelayEXI: command word %02x (#%u)\r\n", cmd, trace_imm);
+			}
 			return true;
+		}
+		if (trace_imm < 6)
+		{
+			trace_imm++;
+			dbgprintf("RelayEXI: slot B imm write %08x len %u not ours (#%u)\r\n", data, len, trace_imm);
 		}
 		return false;	/* memory card traffic */
 	}
@@ -351,6 +368,11 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 
 bool RelayEXIDMARead(u8 *ptr, u32 len)
 {
+	if (trace_dma < 6)
+	{
+		trace_dma++;
+		dbgprintf("RelayEXI: slot B dma read ptr %08x len %u, cmd %02x (#%u)\r\n", (u32)ptr, len, exi_cmd, trace_dma);
+	}
 	if (exi_cmd != EXI_RELAY_POLL)
 		return false;
 	exi_cmd = 0;
@@ -562,6 +584,24 @@ static bool teleSend(u8 kind, u32 len)
  * log then still shows the right sum means the PPC ran stale cache, not
  * overwritten memory. */
 static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
+static u32 exi_diag_ms = 0, exi_diag_n = 0;
+extern bool EXI_IRQ;
+
+/* Once a second for the first minute after the module is loaded: the EXI
+ * command mailbox the game's patched EXI stubs spin on (EXI_CMD_0 != 0 means
+ * the game is waiting for an ack the kernel has not given), the pending IRQ
+ * flag, and the relay device's own state. */
+static void exiDiag(u32 state)
+{
+	if (state != MOD_LOADED || exi_diag_n > 60 || tele_uptime - exi_diag_ms < 1000)
+		return;
+	exi_diag_ms = tele_uptime;
+	exi_diag_n++;
+	sync_before_read((void*)EXI_BASE, 0x20);
+	dbgprintf("TMOD:exi at %u ms: cmd0 %08x cmd1 %08x irq %u relay_state %u exi_cmd %02x staged %u\r\n",
+		tele_uptime, read32(EXI_CMD_0), read32(EXI_CMD_1), EXI_IRQ ? 1 : 0,
+		relay_state, exi_cmd, stage_len);
+}
 /* Per-line sums of the last sample, to report WHICH part changed. */
 #define TMOD_WATCH_LINES 4096
 static u32 tmod_line_sum[TMOD_WATCH_LINES];
@@ -655,6 +695,7 @@ static void serviceTelemetry(void)
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
 	watchModule(state, load, len);
 	watchCrash();
+	exiDiag(state);
 
 	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
 		return;
