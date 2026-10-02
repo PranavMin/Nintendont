@@ -7,6 +7,12 @@
 
 #define NIN_CFG_VERSION		0x0000000E
 
+/* LazyTO: the loader's own settings file. Slippi Nintendont uses
+ * /slippi_nincfg.bin; a different name means a venue's Slippi Nintendont on
+ * the same SD card and this loader never read or overwrite each other's
+ * settings, whatever versions they write. */
+#define NIN_CFG_FILE		"/lazyto_nincfg.bin"
+
 #define NIN_CFG_MAXPAD 4
 
 // IF YOU CHANGE THE SIZE OF THIS struct YOU MUST BUMP NIN_CFG_VERSION AND UPDATE LoadNinCFG.
