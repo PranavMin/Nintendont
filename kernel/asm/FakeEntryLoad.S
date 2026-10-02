@@ -31,8 +31,8 @@ InvalidateRange1:
 	# outside the DOL range. The ARM writing it straight into MEM1 left the
 	# PPC executing stale cache lines (zeros from multidol RAMInit: "Illegal
 	# instruction at 817E88D8" on the first hardware runs, 2026-09-30, even
-	# after a dcbi/icbi pass here). So the PPC now copies it itself from an
-	# uncached MEM2 staging copy the kernel keeps, through its own caches,
+	# after a dcbi/icbi pass here). So the kernel only stages it in MEM2 and
+	# the PPC copies it in itself, uncached source, through its own caches,
 	# flushing each line - the same path every other PPC-written byte takes.
 	# MOD_FLUSH_LEN is the line count (0 = no module), MOD_FLUSH_ADDR the
 	# cached destination, MOD_SRC the uncached source.
