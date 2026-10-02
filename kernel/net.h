@@ -41,12 +41,17 @@ union ullc {
 
 
 // Poll events (?)
-#define POLLIN				0x0001
-#define POLLPRI				0x0002
-#define POLLOUT				0x0004
-#define POLLERR				0x0008
-#define POLLHUP				0x0010
-#define POLLNVAL			0x0020
+/* IOS's poll bits (libogc network.h): RDNORM 1, RDBAND 2, PRI 4, WRNORM 8,
+ * WRBAND 0x10, ERR 0x20, HUP 0x40, NVAL 0x80. The old values here were
+ * Linux's; POLLIN happened to match so reads worked, POLLOUT (4) was
+ * IOS's POLLPRI, so waiting for a non-blocking connect() never woke up
+ * (RelayEXI, 2026-10-01). */
+#define POLLIN				0x0003
+#define POLLPRI				0x0004
+#define POLLOUT				0x0008
+#define POLLERR				0x0020
+#define POLLHUP				0x0040
+#define POLLNVAL			0x0080
 
 struct setsockopt_params {
 	u32 socket;
