@@ -88,10 +88,15 @@
 
 /* IOS socket error codes, negated on return. Dolphin
  * Source/Core/Core/IOS/Network/Socket.h `WiiSockets` (same order as libogc's
- * errmap): EAGAIN 6, EALREADY 7, EINPROGRESS 27. */
+ * errmap): EAGAIN 6, EALREADY 7, EINPROGRESS 26 (NOT 27, which is EINTR:
+ * the table is alphabetical from E2BIG = 1; Dolphin IPC_HLE/WII_Socket.h
+ * has the same enum). With 27 every connect() that did not complete
+ * synchronously was treated as a failure - against a relay on the same
+ * PC that was rare, against the Pi it was every time (NO LINK TO THE
+ * RELAY, 2026-10-01). */
 #define RELAY_SO_EAGAIN		6
 #define RELAY_SO_EALREADY	7
-#define RELAY_SO_EINPROGRESS	27
+#define RELAY_SO_EINPROGRESS	26
 
 /* From kernel/net.c */
 extern s32 top_fd;
