@@ -97,6 +97,7 @@
 #define RELAY_SO_EAGAIN		6
 #define RELAY_SO_EALREADY	7
 #define RELAY_SO_EINPROGRESS	26
+#define RELAY_CONNECT_SLICE_MS	50	/* poll slice while a connect is in progress (see doRoundTrip) */
 
 /* From kernel/net.c */
 extern s32 top_fd;
@@ -865,14 +866,29 @@ static const char *doRoundTrip(u32 start)
 	}
 	else if (res < 0)
 	{
-		pfd[0].socket = sock;
-		pfd[0].events = POLLOUT;
-		pfd[0].revents = 0;
-		res = poll(top_fd, pfd, 1, remainingMs(start));
-		dbgprintf("RelayEXI: connect in progress; poll(POLLOUT) -> %d revents %04x after %u ms\r\n",
-			res, (u32)pfd[0].revents, TimerDiffMs(start));
-		if (res <= 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) || !(pfd[0].revents & POLLOUT))
-			fail = "connect timeout";
+		/* IOS's poll does not wake when a connecting socket becomes writable:
+		 * on hardware (2026-10-01) poll(POLLOUT, 3200 ms) slept the whole
+		 * 3200 ms and only then reported revents 0008, the connect having
+		 * completed long before, so the reply read ran out of budget. Poll in
+		 * short slices instead; completion is seen within one slice. */
+		u32 rem;
+		fail = "connect timeout";
+		while ((rem = remainingMs(start)) > 0)
+		{
+			pfd[0].socket = sock;
+			pfd[0].events = POLLOUT;
+			pfd[0].revents = 0;
+			res = poll(top_fd, pfd, 1, rem < RELAY_CONNECT_SLICE_MS ? rem : RELAY_CONNECT_SLICE_MS);
+			if (res < 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)))
+				break;
+			if (res > 0 && (pfd[0].revents & POLLOUT))
+			{
+				fail = NULL;
+				break;
+			}
+		}
+		dbgprintf("RelayEXI: connect in progress; %s after %u ms (poll %d revents %04x)\r\n",
+			fail ? "gave up" : "connected", TimerDiffMs(start), res, (u32)pfd[0].revents);
 	}
 	else
 		dbgprintf("RelayEXI: connect() completed synchronously\r\n");
