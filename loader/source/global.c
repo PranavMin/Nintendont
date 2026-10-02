@@ -336,6 +336,7 @@ bool LoadNinCFG(void)
 				ConfigLoaded = false;
 			break;
 		case 0xD:
+		case 0xE: // NIN_CFG_VERSION since 0xE: what this loader saves itself (same size)
 			if (BytesRead != sizeof(NIN_CFG)) // 324
 				ConfigLoaded = false;
 			break;
