@@ -829,6 +829,7 @@ static const char *doRoundTrip(u32 start)
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
 	const char *fail = NULL;
 	s32 sock, res, flags;
+	u32 polls = 0;	/* reply polls traced (first few) */
 	/* One snapshot per round trip: a beacon that moves the relay mid-request
 	 * takes effect on the next request. */
 	const u32 ip = relay_ip;
@@ -868,9 +869,13 @@ static const char *doRoundTrip(u32 start)
 		pfd[0].events = POLLOUT;
 		pfd[0].revents = 0;
 		res = poll(top_fd, pfd, 1, remainingMs(start));
+		dbgprintf("RelayEXI: connect in progress; poll(POLLOUT) -> %d revents %04x after %u ms\r\n",
+			res, (u32)pfd[0].revents, TimerDiffMs(start));
 		if (res <= 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) || !(pfd[0].revents & POLLOUT))
 			fail = "connect timeout";
 	}
+	else
+		dbgprintf("RelayEXI: connect() completed synchronously\r\n");
 
 	if (!fail)
 	{
@@ -883,6 +888,7 @@ static const char *doRoundTrip(u32 start)
 		memcpy(auth->secret, cfg.secret, SECRET_LEN);
 		memcpy(send_buf + sizeof(struct relay_auth), req_buf, req_len);
 		res = sendto(top_fd, sock, send_buf, total, 0);
+		dbgprintf("RelayEXI: sendto %u bytes -> %d after %u ms\r\n", total, res, TimerDiffMs(start));
 		if (res != (s32)total)
 			fail = "send";
 	}
@@ -902,13 +908,23 @@ static const char *doRoundTrip(u32 start)
 		pfd[0].events = POLLIN;
 		pfd[0].revents = 0;
 		res = poll(top_fd, pfd, 1, rem);
+		if (polls < 4)
+			dbgprintf("RelayEXI: reply poll(POLLIN, %u ms) -> %d revents %04x after %u ms\r\n",
+				rem, res, (u32)pfd[0].revents, TimerDiffMs(start));
+		polls++;
 		if (res < 0)
 		{
 			fail = "poll";
 			break;
 		}
 		if (res == 0 || !(pfd[0].revents & (POLLIN | POLLHUP | POLLERR)))
+		{
+			/* A poll that returns at once with bits we do not read would spin
+			 * until the deadline; a short sleep keeps the log readable. */
+			if (res > 0)
+				mdelay(10);
 			continue;
+		}
 		if (resp_len >= RELAY_RESP_MAX)
 		{
 			fail = "response too large";
@@ -918,6 +934,8 @@ static const char *doRoundTrip(u32 start)
 		if (want > RELAY_RX_CHUNK)
 			want = RELAY_RX_CHUNK;
 		res = recvfrom(top_fd, sock, rx_chunk, want, 0);
+		if (polls <= 4)
+			dbgprintf("RelayEXI: recvfrom(%u) -> %d after %u ms\r\n", want, res, TimerDiffMs(start));
 		if (res == 0)
 			break;	/* clean close = end of the one response */
 		if (res == -RELAY_SO_EAGAIN)
