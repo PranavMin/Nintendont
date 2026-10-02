@@ -45,8 +45,10 @@ union ullc {
  * WRBAND 0x10, ERR 0x20, HUP 0x40, NVAL 0x80. The old values here were
  * Linux's; POLLIN happened to match so reads worked, POLLOUT (4) was
  * IOS's POLLPRI, so waiting for a non-blocking connect() never woke up
- * (RelayEXI, 2026-10-01). */
-#define POLLIN				0x0003
+ * (RelayEXI, 2026-10-01). POLLIN stays RDNORM alone: with RDBAND added
+ * (libogc's macro) the real IOS poll never reported the relay's reply
+ * readable, with 1 it did on 2026-09-30 and again on 2026-10-01. */
+#define POLLIN				0x0001
 #define POLLPRI				0x0004
 #define POLLOUT				0x0008
 #define POLLERR				0x0020
