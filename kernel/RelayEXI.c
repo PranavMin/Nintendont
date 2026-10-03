@@ -306,18 +306,11 @@ static void loadCfg(void)
 /* ------------------------------------------------------------------------- */
 /* EXI hooks: kernel main loop, never block                                  */
 
-static u32 trace_select = 0, trace_imm = 0, trace_dma = 0;	/* first-N traces of the EXI hooks */
-
 void RelayEXISelect(void)
 {
 	exi_cmd = 0;
 	exi_dispatched = false;
 	stage_len = 0;
-	if (trace_select < 3)
-	{
-		trace_select++;
-		dbgprintf("RelayEXI: slot B selected (#%u)\r\n", trace_select);
-	}
 }
 
 /* Hand the staged request to the thread. Main loop context. */
@@ -350,17 +343,7 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 			exi_cmd = cmd;
 			exi_dispatched = false;
 			stage_len = 0;
-			if (trace_imm < 6)
-			{
-				trace_imm++;
-				dbgprintf("RelayEXI: command word %02x (#%u)\r\n", cmd, trace_imm);
-			}
 			return true;
-		}
-		if (trace_imm < 6)
-		{
-			trace_imm++;
-			dbgprintf("RelayEXI: slot B imm write %08x len %u not ours (#%u)\r\n", data, len, trace_imm);
 		}
 		return false;	/* memory card traffic */
 	}
@@ -398,11 +381,6 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 
 bool RelayEXIDMARead(u8 *ptr, u32 len)
 {
-	if (trace_dma < 6)
-	{
-		trace_dma++;
-		dbgprintf("RelayEXI: slot B dma read ptr %08x len %u, cmd %02x (#%u)\r\n", (u32)ptr, len, exi_cmd, trace_dma);
-	}
 	if (exi_cmd != EXI_RELAY_POLL)
 		return false;
 	exi_cmd = 0;
@@ -647,59 +625,6 @@ static bool teleSend(u8 kind, u32 len)
 	return false;
 }
 
-/* Idle-thread duty, after serviceBeacon: once the relay is known, a
- * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
- * state changes or the relay moves), and the unsent kernel log in TM_LOG
- * chunks. Needs tournament.cfg's secret like every request. */
-/* Module integrity watch: once a second for the first minute after the module
- * is loaded, the ARM reads the module back from MEM1 and logs the first word
- * and word sum whenever they change (and once at the start). A crash whose
- * log then still shows the right sum means the PPC ran stale cache, not
- * overwritten memory. */
-static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
-/* Per-line sums of the last sample, to report WHICH part changed. */
-#define TMOD_WATCH_LINES 4096
-static u32 tmod_line_sum[TMOD_WATCH_LINES];
-
-static void watchModule(u32 state, u32 load, u32 len)
-{
-	u32 i, sum = 0, first, lines, lo = 0xFFFFFFFF, hi = 0, changed = 0;
-	if (state != MOD_LOADED || tmod_watch_n > 60 || tele_uptime - tmod_watch_ms < 1000)
-		return;
-	tmod_watch_ms = tele_uptime;
-	lines = (len + 31) >> 5;
-	if (lines > TMOD_WATCH_LINES)
-		lines = TMOD_WATCH_LINES;
-	sync_before_read((void*)P2C(load), lines << 5);
-	first = read32(P2C(load));
-	for (i = 0; i < lines; i++)
-	{
-		u32 k, ls = 0, a = P2C(load) + (i << 5);
-		for (k = 0; k < 32; k += 4)
-			ls += read32(a + k);
-		sum += ls;
-		if (tmod_watch_n > 0 && ls != tmod_line_sum[i])
-		{
-			changed++;
-			if (i < lo) lo = i;
-			if (i > hi) hi = i;
-		}
-		tmod_line_sum[i] = ls;
-	}
-	/* Only the module region is invalidated and read here. Never touch low
-	 * memory or the EXI mailbox from this thread: an ARM cache invalidate
-	 * racing the EXI handler's write + flush of an ack or an interrupt cause
-	 * word drops it, and the PPC then spins forever in its EXI stub - the
-	 * intermittent black screen at launch seen 2026-09-30 while a boot-word
-	 * dump lived here. */
-	if (tmod_watch_n == 0 || sum != tmod_watch_sum)
-		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x; %u lines changed, %08x..%08x\r\n",
-			tmod_watch_n, tele_uptime, first, sum, changed,
-			changed ? load + (lo << 5) : 0, changed ? load + (hi << 5) + 31 : 0);
-	tmod_watch_sum = sum;
-	tmod_watch_n++;
-}
-
 /* Log a new crash report as soon as the module writes one (network or not),
  * and remember it for TM_CRASH. */
 static void watchCrash(void)
@@ -723,6 +648,10 @@ static void watchCrash(void)
 		dbgprintf("TMOD:CRASH stack[%u] %08x\r\n", i, crash_copy.stack[i]);
 }
 
+/* Idle-thread duty, after serviceBeacon: once the relay is known, a
+ * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
+ * state changes or the relay moves), and the unsent kernel log in TM_LOG
+ * chunks. Needs tournament.cfg's secret like every request. */
 static void serviceTelemetry(void)
 {
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
@@ -740,7 +669,6 @@ static void serviceTelemetry(void)
 	tele_status_ms += dt;
 
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
-	watchModule(state, load, len);
 	watchCrash();
 
 	if (!NetworkStarted || relay_ip == 0 || !cfg.ok || !cfg.has_secret)
@@ -830,7 +758,6 @@ static const char *doRoundTrip(u32 start)
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
 	const char *fail = NULL;
 	s32 sock, res, flags;
-	u32 polls = 0;	/* reply polls traced (first few) */
 	/* One snapshot per round trip: a beacon that moves the relay mid-request
 	 * takes effect on the next request. */
 	const u32 ip = relay_ip;
@@ -887,11 +814,10 @@ static const char *doRoundTrip(u32 start)
 				break;
 			}
 		}
-		dbgprintf("RelayEXI: connect in progress; %s after %u ms (poll %d revents %04x)\r\n",
-			fail ? "gave up" : "connected", TimerDiffMs(start), res, (u32)pfd[0].revents);
+		if (fail)
+			dbgprintf("RelayEXI: connect gave up after %u ms (poll %d revents %04x)\r\n",
+				TimerDiffMs(start), res, (u32)pfd[0].revents);
 	}
-	else
-		dbgprintf("RelayEXI: connect() completed synchronously\r\n");
 
 	if (!fail)
 	{
@@ -904,7 +830,6 @@ static const char *doRoundTrip(u32 start)
 		memcpy(auth->secret, cfg.secret, SECRET_LEN);
 		memcpy(send_buf + sizeof(struct relay_auth), req_buf, req_len);
 		res = sendto(top_fd, sock, send_buf, total, 0);
-		dbgprintf("RelayEXI: sendto %u bytes -> %d after %u ms\r\n", total, res, TimerDiffMs(start));
 		if (res != (s32)total)
 			fail = "send";
 	}
@@ -924,10 +849,6 @@ static const char *doRoundTrip(u32 start)
 		pfd[0].events = POLLIN;
 		pfd[0].revents = 0;
 		res = poll(top_fd, pfd, 1, rem);
-		if (polls < 4)
-			dbgprintf("RelayEXI: reply poll(POLLIN, %u ms) -> %d revents %04x after %u ms\r\n",
-				rem, res, (u32)pfd[0].revents, TimerDiffMs(start));
-		polls++;
 		if (res < 0)
 		{
 			fail = "poll";
@@ -936,7 +857,7 @@ static const char *doRoundTrip(u32 start)
 		if (res == 0 || !(pfd[0].revents & (POLLIN | POLLHUP | POLLERR)))
 		{
 			/* A poll that returns at once with bits we do not read would spin
-			 * until the deadline; a short sleep keeps the log readable. */
+			 * until the deadline; a short sleep stops the spin. */
 			if (res > 0)
 				mdelay(10);
 			continue;
@@ -950,8 +871,6 @@ static const char *doRoundTrip(u32 start)
 		if (want > RELAY_RX_CHUNK)
 			want = RELAY_RX_CHUNK;
 		res = recvfrom(top_fd, sock, rx_chunk, want, 0);
-		if (polls <= 4)
-			dbgprintf("RelayEXI: recvfrom(%u) -> %d after %u ms\r\n", want, res, TimerDiffMs(start));
 		if (res == 0)
 			break;	/* clean close = end of the one response */
 		if (res == -RELAY_SO_EAGAIN)
