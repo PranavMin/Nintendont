@@ -1235,6 +1235,9 @@ static void Menu_Settings_InputHandler(MenuCtx *ctx)
 		}
 		else if (ctx->pages.selected == PAGE_SLIPPI_SETTINGS)
 		{
+			// LazyTO: A on a row that changes nothing must not drop
+			// earlier changes from the save.
+			const bool hadChanges = ctx->saveSettings;
 			ctx->saveSettings = true;
 			ctx->redraw = true;
 
@@ -1268,7 +1271,7 @@ static void Menu_Settings_InputHandler(MenuCtx *ctx)
 				int index = ctx->settings.posX - NIN_SLIPPI_DYNAMIC_CODES_START;
 				if (index < 0 || index > codeConfig->lineItemCount) {
 					// If outside of the range for codes, do nothing
-					ctx->saveSettings = false;
+					ctx->saveSettings = hadChanges;
 					ctx->redraw = false;
 					break;
 				}
@@ -1543,7 +1546,7 @@ static void PrintDevInfo(void)
  * @return Bitfield indicating the user's selection:
  * - 0 == go back
  * - 1 == game selected
- * - 2 == go back and save settings (UNUSED)
+ * - 2 == go back and save settings
  * - 3 == game selected and save settings
  */
 static int Menu_GameSelection(void)
@@ -1759,8 +1762,9 @@ static int Menu_GameSelection(void)
 		free(gi[i].Path);
 	}
 
-	// Send user back to the device selection menu
-	if (ctx.selected == false) return 0;
+	// Send user back to the device selection menu.
+	// LazyTO: keep the changes made so far (Home is labelled "Go Back").
+	if (ctx.selected == false) return (ctx.saveSettings ? 2 : 0);
 
 	// Game is selected.
 	return (ctx.saveSettings ? 3 : 1);
