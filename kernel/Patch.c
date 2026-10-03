@@ -1225,7 +1225,7 @@ static bool fileExist(const char *path)
 }
 
 /* Tournament module (tournament-reporter architecture.md, vanilla-ISO architecture).
- * sd:/tournament.bin is the kiosk's code (melee tools/build_module.py), linked
+ * sd:/lazyto_kiosk.bin is the kiosk's code (LazyTO kiosk/tools/build_module.py), linked
  * at a fixed address against the stock GALE01 v1.02 symbol map:
  *   "TMOD" u32 version=1 u32 load_addr u32 blob_len u32 n_patches
  *   u32 guard_addr u32 guard_word, n_patches x {u32 addr, u32 value}, blob
@@ -1241,7 +1241,7 @@ static bool fileExist(const char *path)
  * builder refuses hook addresses those codesets touch. Missing file: plain
  * Melee, one log line. Any other problem: logged, nothing written. The
  * Ishiiruka fork does the same for Dolphin. */
-#define TMOD_PATH "sd:/tournament.bin"
+#define TMOD_PATH "sd:/lazyto_kiosk.bin"
 /* Melee 1.02's OSInit (0x803430E0..0x803430FC) reads BootInfo arenaHi from
  * 0x80000034 and, when it is 0, uses this built-in top instead (lis r3,0x8170).
  * On a Wii the apploader DOES fill 0x34 (the FST base, 0x817F8AC0 for Melee):

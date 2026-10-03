@@ -148,6 +148,10 @@ not enabled (`NIN_CFG_NETWORK` off, `kernel/main.c:315-326`). The game shows the
 
 ### 3.6 `sd:/tournament.cfg`
 
+Renamed `sd:/lazyto_station.txt` on 2026-10-02, and `stream=` dropped (the relay picks the
+stream station itself); the module became `sd:/lazyto_kiosk.bin`. The rest of this report keeps
+the old names.
+
 `loadCfg()` (`kernel/RelayEXI.c:214`) is the investigation's Pattern B (`ConfigInit`,
 `kernel/Config.c:13-39`: FatFS open + `f_read` once at boot) with the SD path spelled out like the
 loader's nickname read (`SD_SLIPPI_DAT_FILE`, `common/include/Slippi.h:13`) and without the

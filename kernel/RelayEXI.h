@@ -16,7 +16,7 @@
 
 #include "global.h"
 
-/* Read sd:/tournament.cfg (station, stream) and spawn the relay thread. Call
+/* Read sd:/lazyto_station.txt (station, secret) and spawn the relay thread. Call
  * once at boot after the SD card is mounted; networking may or may not be up.
  * The thread finds the relay itself: once the network is up it listens for
  * the relay's UDP beacon (decisions.md R15) and uses the latest one's address. */

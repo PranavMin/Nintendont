@@ -7,7 +7,7 @@
 	<git_hash></git_hash>
 	<short_description>LazyTO - Report that sh*t yourself</short_description>
 	<long_description>LazyTO: Slippi Nintendont with the tournament kiosk. Boots Melee into a start.gg set list, scores games automatically and reports them through the venue relay.
-Needs sd:/tournament.bin and sd:/tournament.cfg.
+Needs sd:/lazyto_kiosk.bin and sd:/lazyto_station.txt.
 Built on Slippi Nintendont (https://github.com/project-slippi/Nintendont).</long_description>
 	<no_ios_reload/>
 	<ahb_access/>
