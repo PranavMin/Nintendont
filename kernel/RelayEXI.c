@@ -26,7 +26,7 @@
  *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped.
  *
  * Relay discovery (../tournament-reporter/docs/decisions.md R15, protocol.yaml
- * relay_beacon): tournament.cfg carries no relay address. The relay
+ * relay_beacon): lazyto_station.txt carries no relay address. The relay
  * broadcasts a 12-byte relay_beacon every BEACON_INTERVAL_MS to UDP
  * BEACON_PORT; the same thread, while idle, owns a non-blocking UDP socket
  * bound to that port and takes the latest valid beacon's SOURCE address plus
@@ -35,9 +35,9 @@
  * "no relay found yet".
  *
  * Shared secret (decisions.md R16, protocol.yaml relay_auth): every TCP request
- * starts with a 20-byte relay_auth carrying tournament.cfg's secret=, then
+ * starts with a 20-byte relay_auth carrying lazyto_station.txt's secret=, then
  * the game's relay_hdr + payload. The game never sees it. A card without a
- * valid secret= answers ST_INTERNAL "no secret in tournament.cfg" locally;
+ * valid secret= answers ST_INTERNAL "no secret in station file" locally;
  * a wrong one comes back from the relay as ST_BAD_SECRET.
  */
 
@@ -63,7 +63,7 @@
 
 #define RELAY_BUDGET_MS		3000	/* design 4.6: one attempt, 3 s */
 #define RELAY_THREAD_CYCLE_MS	1	/* like SlippiNetwork.c THREAD_CYCLE_TIME_MS */
-#define RELAY_CFG_PATH		"sd:/tournament.cfg"	/* design 4.3 */
+#define RELAY_CFG_PATH		"sd:/lazyto_station.txt"	/* the station file in the relay's SD-card zip */
 #define RELAY_CFG_MAX		512
 #define RELAY_RX_CHUNK		1024
 #define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
@@ -74,7 +74,7 @@
 /* Shown top-right on the kiosk's set list next to the module's own version
  * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
  * behaviour the TO should be able to tell apart on the TV. */
-#define RELAY_HOST_BUILD	3	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host) */
+#define RELAY_HOST_BUILD	4	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream= */
 #define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
@@ -108,12 +108,11 @@ static u32 RelayEXI_Thread;
 extern char __relay_exi_stack_addr, __relay_exi_stack_size;
 static u32 RelayEXIThread(void *arg);
 
-/* sd:/tournament.cfg */
+/* sd:/lazyto_station.txt */
 struct RelayCfg {
 	u16	station;	/* station */
-	u8	stream;		/* stream (0/1) */
-	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no tournament.cfg" */
-	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in tournament.cfg" */
+	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no station file" */
+	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in station file" */
 	char	secret[SECRET_LEN];	/* NUL-padded, as relay_auth carries it */
 };
 static struct RelayCfg cfg;
@@ -187,7 +186,7 @@ static u8 rx_chunk[RELAY_RX_CHUNK] ALIGNED(32);	/* 32-byte aligned recvfrom targ
 static u8 poll_image[RELAY_EXI_BUF_SIZE] ALIGNED(32);
 
 /* ------------------------------------------------------------------------- */
-/* tournament.cfg                                                            */
+/* lazyto_station.txt                                                        */
 
 /* Parse an unsigned decimal <= max: digits only, at least one, then only
  * trailing whitespace. */
@@ -229,13 +228,12 @@ static bool parseSecret(const char *s, char *out)
 	return *s == 0 && n >= 8;
 }
 
-/* key=value lines, keys station / stream (design 4.3), both required, unknown
- * keys ignored, blank lines ignored. relay_ip / relay_port from cards written
- * before relay discovery (decisions.md R15) are unknown keys now: ignored, the
- * relay's address comes from its beacon. */
+/* key=value lines: station (required) and secret, unknown keys ignored, blank
+ * lines ignored. The relay picks the stream station itself, so a stream= line
+ * is just an unknown key. */
 static bool parseCfg(char *text)
 {
-	bool have_station = false, have_stream = false;
+	bool have_station = false;
 	char *line = text;
 
 	while (*line)
@@ -260,15 +258,10 @@ static bool parseCfg(char *text)
 				have_station = parseU32(val, 65535, &v);
 				cfg.station = (u16)v;
 			}
-			else if (strcmp(line, "stream") == 0)
-			{
-				have_stream = parseU32(val, 1, &v);
-				cfg.stream = (u8)v;
-			}
 		}
 		line = next;
 	}
-	return have_station && have_stream;
+	return have_station;
 }
 
 /* Pattern B from the investigation (kernel/Config.c ConfigInit: FatFS open +
@@ -297,8 +290,8 @@ static void loadCfg(void)
 
 	cfg.ok = parseCfg(cfg_text);
 	if (cfg.ok)
-		dbgprintf("RelayEXI: station %u stream %u secret %s (relay address from its beacon, udp %u)\r\n",
-			cfg.station, cfg.stream, cfg.has_secret ? "set" : "MISSING", BEACON_PORT);
+		dbgprintf("RelayEXI: station %u secret %s (relay address from its beacon, udp %u)\r\n",
+			cfg.station, cfg.has_secret ? "set" : "MISSING", BEACON_PORT);
 	else
 		dbgprintf("RelayEXI: %s malformed\r\n", RELAY_CFG_PATH);
 }
@@ -651,7 +644,7 @@ static void watchCrash(void)
 /* Idle-thread duty, after serviceBeacon: once the relay is known, a
  * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
  * state changes or the relay moves), and the unsent kernel log in TM_LOG
- * chunks. Needs tournament.cfg's secret like every request. */
+ * chunks. Needs lazyto_station.txt's secret like every request. */
 static void serviceTelemetry(void)
 {
 	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
@@ -912,14 +905,13 @@ static u32 RelayEXIThread(void *arg)
 		h = (struct relay_hdr *)req_buf;
 		resp_len = 0;
 
-		/* Station/stream stamping (design 5.3, 6.2 item 2): the game sends 0. */
+		/* Station stamping (design 5.3): the game sends 0. start_set_req.stream
+		 * goes out as the game sent it; the relay ignores it. */
 		h->station = cfg.station;
-		if (h->cmd == CMD_START_SET && req_len >= sizeof(struct relay_hdr) + sizeof(struct start_set_req))
-			((struct start_set_req *)(req_buf + sizeof(struct relay_hdr)))->stream = cfg.stream;
 
 		if (!cfg.ok)
 		{
-			synthResponse("no tournament.cfg");
+			synthResponse("no station file");
 			fail = NULL;
 		}
 		else if (!NetworkStarted)
@@ -929,7 +921,7 @@ static u32 RelayEXIThread(void *arg)
 		}
 		else if (!cfg.has_secret)
 		{
-			synthResponse("no secret in tournament.cfg");
+			synthResponse("no secret in station file");
 			fail = NULL;
 		}
 		else if (relay_ip == 0)

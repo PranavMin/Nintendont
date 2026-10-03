@@ -327,7 +327,7 @@ int _main( int argc, char *argv[] )
 		SlippiNetworkBroadcastInit();
 	}
 
-	// Tournament relay EXI device (RelayEXI.c): read sd:/tournament.cfg and
+	// Tournament relay EXI device (RelayEXI.c): read sd:/lazyto_station.txt and
 	// spawn the relay thread. Whether networking came up is checked per request.
 	RelayEXIInit();
 
