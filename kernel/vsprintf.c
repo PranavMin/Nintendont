@@ -307,19 +307,9 @@ int _vsprintf(char *buf, const char *fmt, va_list args)
  */
 extern u32 early_gecko_logging; 
 extern u32 slippi_use_port_a;
-/* Try-lock on the ARM9 SWP instruction (same shape as Telemetry.c). */
-static vu32 sdlog_lock = 0;
-static inline bool sdlog_trylock(void)
-{
-	u32 old;
-	__asm__ volatile("swp %0, %1, [%2]" : "=&r"(old) : "r"(1), "r"(&sdlog_lock) : "memory");
-	return old == 0;
-}
-static inline void sdlog_unlock(void)
-{
-	__asm__ volatile("" ::: "memory");
-	sdlog_lock = 0;
-}
+/* LazyTO: the thread that opened the SD log, the kernel's main thread; only
+ * it writes the SD copy (see dbgprintf). None until sdhc_log_init. */
+static u32 sdlog_thread = 0xFFFFFFFF;
 
 int dbgprintf( const char *fmt, ...)
 {
@@ -365,18 +355,19 @@ int dbgprintf( const char *fmt, ...)
 #endif
 
 	// Deal with writes to SD card. FatFS is not reentrant and this is called
-	// from several threads (main at boot, the relay thread for its beacon
-	// requests, DI); two of them inside f_write/f_sync on the same FIL at
-	// once wedged the main thread at "Kernel Start" (Auto Boot, 2026-09-30).
-	// One writer at a time; a thread that finds the log busy skips the SD
-	// copy of its line (the telemetry ring above still has it). Never wait.
+	// from several threads (main, the relay thread for every request and
+	// beacon, DI). LazyTO: only the main thread writes the SD copy, as in
+	// upstream, where no other thread logs during play. A relay-thread write
+	// landing inside the DI thread's game read froze Melee at the set list
+	// (Log on, 2026-10-03); two writers at once wedged boot (2026-09-30).
+	// Other threads' lines still reach the relay's status page through the
+	// telemetry ring above.
 
-	if ((sdhc_log_enabled == 1) && (sdhc_log_status == FR_OK) && sdlog_trylock())
+	if ((sdhc_log_enabled == 1) && (sdhc_log_status == FR_OK) && thread_get_id() == sdlog_thread)
 	{
 		f_lseek(&sdhc_log, sdhc_log.obj.objsize);
 		f_write(&sdhc_log, buffer, strlen(buffer), &num_bytes);
 		f_sync(&sdhc_log);
-		sdlog_unlock();
 	}
 
 	return 0;
@@ -394,6 +385,7 @@ int sdhc_log_init()
 
 	if (sdhc_log_status != FR_OK)
 		return -1;
+	sdlog_thread = thread_get_id();
 
 	// Write a header to the log file
 	u32 v = read32(0x3140);
