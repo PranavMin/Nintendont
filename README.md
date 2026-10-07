@@ -9,7 +9,7 @@ Melee weekly pick, play and report their start.gg sets from the Wii itself.
 - **Relay EXI device** (`kernel/RelayEXI.c`): the game's requests go over the Wii's network to
   the LazyTO relay, and the answers come back through EXI.
 - **Relay discovery**: the Wii finds the relay by its UDP beacon, so SD cards carry no address.
-- **Module loader**: copies `tournament.bin` from the SD card into RAM at boot and applies its
+- **Module loader**: copies `lazyto_kiosk.bin` from the SD card into RAM at boot and applies its
   hooks on top of stock Melee 1.02. The venue's own Slippi codesets still apply.
 - **Station telemetry**: the kernel log and module load result are sent to the relay status page.
 - The homebrew app is installed as `apps/LazyTO`.
@@ -21,8 +21,7 @@ the relay device design is in [docs/relay-exi-report.md](docs/relay-exi-report.m
 
 | LazyTO repo | Role |
 |---|---|
-| [LazyTO](https://github.com/PranavMin/LazyTO) | Relay on the venue's Raspberry Pi; design docs and setup guides |
-| [melee](https://github.com/PranavMin/melee) | `tournament.bin`, the kiosk module |
+| [LazyTO](https://github.com/PranavMin/LazyTO) | Relay on the venue's Raspberry Pi, the kiosk module (`lazyto_kiosk.bin`), design docs and setup guides |
 | **Nintendont** (this repo) | Wii loader |
 
 Licence: GNU General Public License, version 2, like Nintendont itself; see [COPYING](COPYING).

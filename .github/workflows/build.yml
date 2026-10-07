@@ -44,7 +44,9 @@ jobs:
         if: success()
         working-directory: ${{ github.workspace }}
         run: |
-          sudo docker run --volume=${PWD}:/work --workdir=/work nikhilnarayana/devkitpro-slippi:latest make -j7
+          # Pinned: tag 7, the digest :latest had on 2025-09-14. LazyTO's release.yml
+          # builds the bundle's loader with the same image, so the two match.
+          sudo docker run --volume=${PWD}:/work --workdir=/work nikhilnarayana/devkitpro-slippi:7@sha256:098e03383069609f68cbb950368ac3de18b855b473b7474a0ac9cf830ef43c78 make -j7
       - name: "Package"
         if: success()
         working-directory: ${{ github.workspace }}

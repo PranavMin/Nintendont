@@ -137,8 +137,20 @@ not enabled (`NIN_CFG_NETWORK` off, `kernel/main.c:315-326`). The game shows the
   `RelayEXI: cmd N len N -> ERROR (reason) after T ms`. `dbgprintf` goes to the USB Gecko
   (`slippi_use_port_a`), the SD log (`NIN_CFG_LOG`) or the UDP debug socket under
   `SLIPPI_DEBUG` (`kernel/vsprintf.c:309-345`). Boot logs the parsed config.
+- Bring-up diagnostics, removed 2026-10-02 once their questions were answered on hardware. Revert
+  or cherry-pick them into a debug build if a similar bring-up needs them again:
+  - `36f276a`: per-request round-trip traces (socket, connect, sendto, reply polls, recvfrom).
+    They found the wrong EINPROGRESS value (`c4e972a`) and the IOS poll that never woke on a
+    finished connect (`b29ce3e`).
+  - `d744699`, `180a118`: `watchModule`, which re-read the module in MEM1 once a second and
+    logged which lines changed. It confirmed Melee no longer overwrites the module.
+  - `1851533`: first-N traces of the slot-B EXI hooks.
 
 ### 3.6 `sd:/tournament.cfg`
+
+Renamed `sd:/lazyto_station.txt` on 2026-10-02, and `stream=` dropped (the relay picks the
+stream station itself); the module became `sd:/lazyto_kiosk.bin`. The rest of this report keeps
+the old names.
 
 `loadCfg()` (`kernel/RelayEXI.c:214`) is the investigation's Pattern B (`ConfigInit`,
 `kernel/Config.c:13-39`: FatFS open + `f_read` once at boot) with the SD path spelled out like the

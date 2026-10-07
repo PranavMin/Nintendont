@@ -26,7 +26,7 @@
  *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped.
  *
  * Relay discovery (../tournament-reporter/docs/decisions.md R15, protocol.yaml
- * relay_beacon): tournament.cfg carries no relay address. The relay
+ * relay_beacon): lazyto_station.txt carries no relay address. The relay
  * broadcasts a 12-byte relay_beacon every BEACON_INTERVAL_MS to UDP
  * BEACON_PORT; the same thread, while idle, owns a non-blocking UDP socket
  * bound to that port and takes the latest valid beacon's SOURCE address plus
@@ -35,12 +35,12 @@
  * "no relay found yet".
  *
  * Shared secret (decisions.md R16, protocol.yaml relay_auth): every TCP request
- * starts with a 20-byte relay_auth carrying tournament.cfg's secret=, then
+ * starts with a 20-byte relay_auth carrying lazyto_station.txt's secret=, then
  * the game's relay_hdr + payload. The game never sees it. A card without a
- * valid secret= answers ST_INTERNAL "no secret in tournament.cfg" locally;
+ * valid secret= answers ST_INTERNAL "no secret in station file" locally;
  * a wrong one comes back from the relay as ST_BAD_SECRET.
  *
- * Beamer transport (tournament.cfg transport=beamer, protocol.yaml beamer_*):
+ * Beamer transport (lazyto_station.txt transport=beamer, protocol.yaml beamer_*):
  * the same bytes travel through a LazyTO beamer, an ESP32 USB mass-storage
  * stick on the Wi-Fi that is also the Slippi replay drive, and the thread
  * opens no IOS socket at all (no beacon, no UDP). The beamer serves
@@ -81,7 +81,7 @@
 
 #define RELAY_BUDGET_MS		3000	/* design 4.6: one attempt, 3 s */
 #define RELAY_THREAD_CYCLE_MS	1	/* like SlippiNetwork.c THREAD_CYCLE_TIME_MS */
-#define RELAY_CFG_PATH		"sd:/tournament.cfg"	/* design 4.3 */
+#define RELAY_CFG_PATH		"sd:/lazyto_station.txt"	/* the station file in the relay's SD-card zip */
 #define RELAY_CFG_MAX		512
 #define RELAY_RX_CHUNK		1024
 #define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
@@ -94,7 +94,7 @@
 /* Shown top-right on the kiosk's set list next to the module's own version
  * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
  * behaviour the TO should be able to tell apart on the TV. */
-#define RELAY_HOST_BUILD	3	/* 2: network init off the boot path, PF_NET_JOINING; 3: beamer transport */
+#define RELAY_HOST_BUILD	5	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream=; 5: beamer transport */
 #define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
 
 /* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
@@ -108,10 +108,16 @@
 
 /* IOS socket error codes, negated on return. Dolphin
  * Source/Core/Core/IOS/Network/Socket.h `WiiSockets` (same order as libogc's
- * errmap): EAGAIN 6, EALREADY 7, EINPROGRESS 27. */
+ * errmap): EAGAIN 6, EALREADY 7, EINPROGRESS 26 (NOT 27, which is EINTR:
+ * the table is alphabetical from E2BIG = 1; Dolphin IPC_HLE/WII_Socket.h
+ * has the same enum). With 27 every connect() that did not complete
+ * synchronously was treated as a failure - against a relay on the same
+ * PC that was rare, against the Pi it was every time (NO LINK TO THE
+ * RELAY, 2026-10-01). */
 #define RELAY_SO_EAGAIN		6
 #define RELAY_SO_EALREADY	7
-#define RELAY_SO_EINPROGRESS	27
+#define RELAY_SO_EINPROGRESS	26
+#define RELAY_CONNECT_SLICE_MS	50	/* poll slice while a connect is in progress (see doRoundTrip) */
 
 /* From kernel/net.c */
 extern s32 top_fd;
@@ -122,12 +128,11 @@ static u32 RelayEXI_Thread;
 extern char __relay_exi_stack_addr, __relay_exi_stack_size;
 static u32 RelayEXIThread(void *arg);
 
-/* sd:/tournament.cfg */
+/* sd:/lazyto_station.txt */
 struct RelayCfg {
 	u16	station;	/* station */
-	u8	stream;		/* stream (0/1) */
-	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no tournament.cfg" */
-	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in tournament.cfg" */
+	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no station file" */
+	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in station file" */
 	bool	beamer;		/* transport=beamer: the USB mailbox instead of IOS sockets */
 	char	secret[SECRET_LEN];	/* NUL-padded, as relay_auth carries it */
 };
@@ -223,7 +228,7 @@ RELAY_STATIC_ASSERT(sizeof(struct beamer_tele_hdr) + sizeof(tele_buf) <= BEAMER_
 RELAY_STATIC_ASSERT(sizeof(struct beamer_resp_hdr) + RELAY_RESP_MAX == sizeof(mb_buf), beamer_resp_fits);
 
 /* ------------------------------------------------------------------------- */
-/* tournament.cfg                                                            */
+/* lazyto_station.txt                                                        */
 
 /* Parse an unsigned decimal <= max: digits only, at least one, then only
  * trailing whitespace. */
@@ -277,14 +282,13 @@ static bool parseWord(const char *s, const char *word)
 	return *s == 0;
 }
 
-/* key=value lines, keys station / stream (design 4.3), both required, unknown
- * keys ignored, blank lines ignored. relay_ip / relay_port from cards written
- * before relay discovery (decisions.md R15) are unknown keys now: ignored, the
- * relay's address comes from its beacon. transport= is network (also when
- * absent, so older cards keep working) or beamer; anything else is malformed. */
+/* key=value lines: station (required) and secret, unknown keys ignored, blank
+ * lines ignored. The relay picks the stream station itself, so a stream= line
+ * is just an unknown key. transport= is network (also when absent, so older
+ * cards keep working) or beamer; anything else is malformed. */
 static bool parseCfg(char *text)
 {
-	bool have_station = false, have_stream = false, transport_ok = true;
+	bool have_station = false, transport_ok = true;
 	char *line = text;
 
 	while (*line)
@@ -309,11 +313,6 @@ static bool parseCfg(char *text)
 				have_station = parseU32(val, 65535, &v);
 				cfg.station = (u16)v;
 			}
-			else if (strcmp(line, "stream") == 0)
-			{
-				have_stream = parseU32(val, 1, &v);
-				cfg.stream = (u8)v;
-			}
 			else if (strcmp(line, "transport") == 0)
 			{
 				cfg.beamer = parseWord(val, "beamer");
@@ -322,7 +321,7 @@ static bool parseCfg(char *text)
 		}
 		line = next;
 	}
-	return have_station && have_stream && transport_ok;
+	return have_station && transport_ok;
 }
 
 /* Pattern B from the investigation (kernel/Config.c ConfigInit: FatFS open +
@@ -351,8 +350,8 @@ static void loadCfg(void)
 
 	cfg.ok = parseCfg(cfg_text);
 	if (cfg.ok)
-		dbgprintf("RelayEXI: station %u stream %u secret %s, %s\r\n",
-			cfg.station, cfg.stream, cfg.has_secret ? "set" : "MISSING",
+		dbgprintf("RelayEXI: station %u secret %s, %s\r\n",
+			cfg.station, cfg.has_secret ? "set" : "MISSING",
 			cfg.beamer ? "transport beamer (relay address from the beamer on usb)"
 				: "transport network (relay address from its beacon)");
 	else
@@ -362,18 +361,11 @@ static void loadCfg(void)
 /* ------------------------------------------------------------------------- */
 /* EXI hooks: kernel main loop, never block                                  */
 
-static u32 trace_select = 0, trace_imm = 0, trace_dma = 0;	/* first-N traces of the EXI hooks */
-
 void RelayEXISelect(void)
 {
 	exi_cmd = 0;
 	exi_dispatched = false;
 	stage_len = 0;
-	if (trace_select < 3)
-	{
-		trace_select++;
-		dbgprintf("RelayEXI: slot B selected (#%u)\r\n", trace_select);
-	}
 }
 
 /* Hand the staged request to the thread. Main loop context. */
@@ -406,17 +398,7 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 			exi_cmd = cmd;
 			exi_dispatched = false;
 			stage_len = 0;
-			if (trace_imm < 6)
-			{
-				trace_imm++;
-				dbgprintf("RelayEXI: command word %02x (#%u)\r\n", cmd, trace_imm);
-			}
 			return true;
-		}
-		if (trace_imm < 6)
-		{
-			trace_imm++;
-			dbgprintf("RelayEXI: slot B imm write %08x len %u not ours (#%u)\r\n", data, len, trace_imm);
 		}
 		return false;	/* memory card traffic */
 	}
@@ -454,11 +436,6 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 
 bool RelayEXIDMARead(u8 *ptr, u32 len)
 {
-	if (trace_dma < 6)
-	{
-		trace_dma++;
-		dbgprintf("RelayEXI: slot B dma read ptr %08x len %u, cmd %02x (#%u)\r\n", (u32)ptr, len, exi_cmd, trace_dma);
-	}
 	if (exi_cmd != EXI_RELAY_POLL)
 		return false;
 	exi_cmd = 0;
@@ -524,7 +501,7 @@ static void synthResponse(const char *msg)
 	resp_len = sizeof(struct relay_hdr) + sizeof(struct relay_resp);
 }
 
-/* relay_auth with tournament.cfg's secret= at dst (decisions.md R16): ahead
+/* relay_auth with lazyto_station.txt's secret= at dst (decisions.md R16): ahead
  * of every request and every telemetry datagram, on either transport. */
 static void putAuth(u8 *dst)
 {
@@ -744,59 +721,6 @@ static bool teleSend(u8 kind, u32 len)
 	return false;
 }
 
-/* Idle-thread duty, after serviceBeacon / serviceBeamer: once the relay is
- * known, a TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the
- * module state changes or the relay moves), and the unsent kernel log in
- * TM_LOG chunks. Needs tournament.cfg's secret like every request. */
-/* Module integrity watch: once a second for the first minute after the module
- * is loaded, the ARM reads the module back from MEM1 and logs the first word
- * and word sum whenever they change (and once at the start). A crash whose
- * log then still shows the right sum means the PPC ran stale cache, not
- * overwritten memory. */
-static u32 tmod_watch_ms = 0, tmod_watch_sum = 0, tmod_watch_n = 0;
-/* Per-line sums of the last sample, to report WHICH part changed. */
-#define TMOD_WATCH_LINES 4096
-static u32 tmod_line_sum[TMOD_WATCH_LINES];
-
-static void watchModule(u32 state, u32 load, u32 len)
-{
-	u32 i, sum = 0, first, lines, lo = 0xFFFFFFFF, hi = 0, changed = 0;
-	if (state != MOD_LOADED || tmod_watch_n > 60 || tele_uptime - tmod_watch_ms < 1000)
-		return;
-	tmod_watch_ms = tele_uptime;
-	lines = (len + 31) >> 5;
-	if (lines > TMOD_WATCH_LINES)
-		lines = TMOD_WATCH_LINES;
-	sync_before_read((void*)P2C(load), lines << 5);
-	first = read32(P2C(load));
-	for (i = 0; i < lines; i++)
-	{
-		u32 k, ls = 0, a = P2C(load) + (i << 5);
-		for (k = 0; k < 32; k += 4)
-			ls += read32(a + k);
-		sum += ls;
-		if (tmod_watch_n > 0 && ls != tmod_line_sum[i])
-		{
-			changed++;
-			if (i < lo) lo = i;
-			if (i > hi) hi = i;
-		}
-		tmod_line_sum[i] = ls;
-	}
-	/* Only the module region is invalidated and read here. Never touch low
-	 * memory or the EXI mailbox from this thread: an ARM cache invalidate
-	 * racing the EXI handler's write + flush of an ack or an interrupt cause
-	 * word drops it, and the PPC then spins forever in its EXI stub - the
-	 * intermittent black screen at launch seen 2026-09-30 while a boot-word
-	 * dump lived here. */
-	if (tmod_watch_n == 0 || sum != tmod_watch_sum)
-		dbgprintf("TMOD:RAM watch #%u at %u ms: first %08x, sum %08x; %u lines changed, %08x..%08x\r\n",
-			tmod_watch_n, tele_uptime, first, sum, changed,
-			changed ? load + (lo << 5) : 0, changed ? load + (hi << 5) + 31 : 0);
-	tmod_watch_sum = sum;
-	tmod_watch_n++;
-}
-
 /* Log a new crash report as soon as the module writes one (network or not),
  * and remember it for TM_CRASH. */
 static void watchCrash(void)
@@ -860,6 +784,10 @@ static bool teleConnect(void)
 	return true;
 }
 
+/* Idle-thread duty, after serviceBeacon / serviceBeamer: once the relay is
+ * known, a TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the
+ * module state changes or the relay moves), and the unsent kernel log in
+ * TM_LOG chunks. Needs lazyto_station.txt's secret like every request. */
 static void serviceTelemetry(void)
 {
 	u8 *payload = tele_buf + sizeof(struct relay_auth) + sizeof(struct telemetry_hdr);
@@ -875,7 +803,6 @@ static void serviceTelemetry(void)
 	tele_status_ms += dt;
 
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
-	watchModule(state, load, len);
 	watchCrash();
 
 	if (relay_ip == 0 || !cfg.ok || !cfg.has_secret)
@@ -985,12 +912,30 @@ static const char *doRoundTrip(u32 start)
 	}
 	else if (res < 0)
 	{
-		pfd[0].socket = sock;
-		pfd[0].events = POLLOUT;
-		pfd[0].revents = 0;
-		res = poll(top_fd, pfd, 1, remainingMs(start));
-		if (res <= 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) || !(pfd[0].revents & POLLOUT))
-			fail = "connect timeout";
+		/* IOS's poll does not wake when a connecting socket becomes writable:
+		 * on hardware (2026-10-01) poll(POLLOUT, 3200 ms) slept the whole
+		 * 3200 ms and only then reported revents 0008, the connect having
+		 * completed long before, so the reply read ran out of budget. Poll in
+		 * short slices instead; completion is seen within one slice. */
+		u32 rem;
+		fail = "connect timeout";
+		while ((rem = remainingMs(start)) > 0)
+		{
+			pfd[0].socket = sock;
+			pfd[0].events = POLLOUT;
+			pfd[0].revents = 0;
+			res = poll(top_fd, pfd, 1, rem < RELAY_CONNECT_SLICE_MS ? rem : RELAY_CONNECT_SLICE_MS);
+			if (res < 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)))
+				break;
+			if (res > 0 && (pfd[0].revents & POLLOUT))
+			{
+				fail = NULL;
+				break;
+			}
+		}
+		if (fail)
+			dbgprintf("RelayEXI: connect gave up after %u ms (poll %d revents %04x)\r\n",
+				TimerDiffMs(start), res, (u32)pfd[0].revents);
 	}
 
 	if (!fail)
@@ -1023,7 +968,13 @@ static const char *doRoundTrip(u32 start)
 			break;
 		}
 		if (res == 0 || !(pfd[0].revents & (POLLIN | POLLHUP | POLLERR)))
+		{
+			/* A poll that returns at once with bits we do not read would spin
+			 * until the deadline; a short sleep stops the spin. */
+			if (res > 0)
+				mdelay(10);
 			continue;
+		}
 		if (resp_len >= RELAY_RESP_MAX)
 		{
 			fail = "response too large";
@@ -1246,14 +1197,13 @@ static u32 RelayEXIThread(void *arg)
 		h = (struct relay_hdr *)req_buf;
 		resp_len = 0;
 
-		/* Station/stream stamping (design 5.3, 6.2 item 2): the game sends 0. */
+		/* Station stamping (design 5.3): the game sends 0. start_set_req.stream
+		 * goes out as the game sent it; the relay ignores it. */
 		h->station = cfg.station;
-		if (h->cmd == CMD_START_SET && req_len >= sizeof(struct relay_hdr) + sizeof(struct start_set_req))
-			((struct start_set_req *)(req_buf + sizeof(struct relay_hdr)))->stream = cfg.stream;
 
 		if (!cfg.ok)
 		{
-			synthResponse("no tournament.cfg");
+			synthResponse("no station file");
 			fail = NULL;
 		}
 		else if (cfg.beamer && !beamer_up)
@@ -1268,7 +1218,7 @@ static u32 RelayEXIThread(void *arg)
 		}
 		else if (!cfg.has_secret)
 		{
-			synthResponse("no secret in tournament.cfg");
+			synthResponse("no secret in station file");
 			fail = NULL;
 		}
 		else if (cfg.beamer)

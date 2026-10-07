@@ -313,7 +313,7 @@ bool LoadNinCFG(void)
 {
 	bool ConfigLoaded = true;
 	FIL cfg;
-	if (f_open_char(&cfg, "/slippi_nincfg.bin", FA_READ|FA_OPEN_EXISTING) != FR_OK)
+	if (f_open_char(&cfg, NIN_CFG_FILE, FA_READ|FA_OPEN_EXISTING) != FR_OK)
 		return false;
 
 	// Read the configuration file into memory.
@@ -336,6 +336,7 @@ bool LoadNinCFG(void)
 				ConfigLoaded = false;
 			break;
 		case 0xD:
+		case 0xE: // NIN_CFG_VERSION since 0xE: what this loader saves itself (same size)
 			if (BytesRead != sizeof(NIN_CFG)) // 324
 				ConfigLoaded = false;
 			break;

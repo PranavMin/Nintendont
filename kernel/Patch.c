@@ -1225,20 +1225,23 @@ static bool fileExist(const char *path)
 }
 
 /* Tournament module (tournament-reporter architecture.md, vanilla-ISO architecture).
- * sd:/tournament.bin is the kiosk's code (melee tools/build_module.py), linked
+ * sd:/lazyto_kiosk.bin is the kiosk's code (LazyTO kiosk/tools/build_module.py), linked
  * at a fixed address against the stock GALE01 v1.02 symbol map:
  *   "TMOD" u32 version=1 u32 load_addr u32 blob_len u32 n_patches
  *   u32 guard_addr u32 guard_word, n_patches x {u32 addr, u32 value}, blob
  * Applied here, in the full-DOL patch pass, once the apploader has placed the
  * whole DOL and the arena-top word (0x34) but before the PPC runs it: verify
- * the guard (a vanilla instruction), copy the blob to load_addr (above the
- * arena top the game adopts), apply the patch words, lower 0x34 to load_addr
- * so the heap stops below the module. The Slippi core / MeleeCodes / codehandler
+ * the guard (a vanilla instruction) and that the module fits below the arena
+ * top, read the blob into a MEM2 staging copy and apply the patch words. At
+ * game entry the PPC copies the blob to load_addr through its own caches and
+ * lowers 0x34 to load_addr so the heap stops below the module (FakeEntryLoad,
+ * PatchGame below): an ARM write into MEM1 left the PPC running stale cache
+ * lines on the first hardware runs. The Slippi core / MeleeCodes / codehandler
  * are applied to the same vanilla DOL exactly as without the module; the
  * builder refuses hook addresses those codesets touch. Missing file: plain
  * Melee, one log line. Any other problem: logged, nothing written. The
  * Ishiiruka fork does the same for Dolphin. */
-#define TMOD_PATH "sd:/tournament.bin"
+#define TMOD_PATH "sd:/lazyto_kiosk.bin"
 /* Melee 1.02's OSInit (0x803430E0..0x803430FC) reads BootInfo arenaHi from
  * 0x80000034 and, when it is 0, uses this built-in top instead (lis r3,0x8170).
  * On a Wii the apploader DOES fill 0x34 (the FST base, 0x817F8AC0 for Melee):
@@ -1257,30 +1260,18 @@ static u32 tmodBE32(const u8 *p)
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
 }
 
-/* First word and 32-bit word sum of the module as RAM holds it (ARM cache
- * dropped first), for the log: compare with the file to tell "never landed"
- * from "overwritten" from "the PPC ran stale cache". */
-static void TModReadback(const char *when, u32 load, u32 len)
-{
-	u32 i, sum = 0;
-	sync_before_read((void*)P2C(load), (len + 31) & ~31);
-	for (i = 0; i + 4 <= len; i += 4)
-		sum += read32(P2C(load) + i);
-	dbgprintf("TMOD:RAM %s: first %08x, sum %08x\r\n", when, read32(P2C(load)), sum);
-}
-
 /* MEM2 staging copy of the module for FakeEntryLoad's PPC-side copy
- * (32-byte aligned; kept for the life of the kernel). */
+ * (32-byte aligned; allocated once and kept for the life of the kernel). */
 static u8 *tmod_stage = NULL;
-static u32 tmod_stage_len = 0;
+static u32 tmod_stage_cap = 0;	/* bytes allocated */
+static u32 tmod_stage_len = 0;	/* bytes the PPC copies: the blob, rounded up to a line */
 
 static void LoadTournamentModule(void)
 {
 	FIL fp;
 	UINT rd = 0;
 	u8 hdr[TMOD_HDR];
-	u32 version, load, len, n, gaddr, gword, arena_hi, i;
-	bool arena_unset = false;
+	u32 version, load, len, n, gaddr, gword, arena_hi, stage_len, i;
 	u8 *patches;
 
 	/* BootInfo (0x80000000..0x3F) is written by the PPC-side apploader; the
@@ -1338,7 +1329,6 @@ static void LoadTournamentModule(void)
 			f_close(&fp);
 			return;
 		}
-		arena_unset = true;
 	}
 	else if (arena_hi < load + len)
 	{
@@ -1347,9 +1337,27 @@ static void LoadTournamentModule(void)
 		f_close(&fp);
 		return;
 	}
+	stage_len = (len + 31) & ~31;
+	if (tmod_stage == NULL)
+	{
+		u8 *raw = malloc(stage_len + 32);
+		if (raw != NULL)
+		{
+			tmod_stage = (u8*)(((u32)raw + 31) & ~31);
+			tmod_stage_cap = stage_len;
+		}
+	}
+	if (tmod_stage == NULL || stage_len > tmod_stage_cap)
+	{
+		dbgprintf("TMOD:no MEM2 for a %u-byte staging copy\r\n", stage_len);
+		TelemetrySetModule(MOD_READ_FAILED, len, load, n, arena_hi);
+		f_close(&fp);
+		return;
+	}
+	memset(tmod_stage, 0, stage_len);
 	patches = malloc(n * 8 + 8);
-	if (f_read(&fp, patches, n * 8, &rd) != FR_OK || rd != n * 8
-		|| f_read(&fp, (void*)P2C(load), len, &rd) != FR_OK || rd != len)
+	if (patches == NULL || f_read(&fp, patches, n * 8, &rd) != FR_OK || rd != n * 8
+		|| f_read(&fp, tmod_stage, len, &rd) != FR_OK || rd != len)
 	{
 		dbgprintf("TMOD:read failed\r\n");
 		TelemetrySetModule(MOD_READ_FAILED, len, load, n, arena_hi);
@@ -1358,7 +1366,8 @@ static void LoadTournamentModule(void)
 		return;
 	}
 	f_close(&fp);
-	sync_after_write((void*)P2C(load), len);
+	sync_after_write(tmod_stage, stage_len);
+	tmod_stage_len = stage_len;
 	for (i = 0; i < n; i++)
 	{
 		u32 addr = tmodBE32(patches + i * 8);
@@ -1366,34 +1375,10 @@ static void LoadTournamentModule(void)
 		write32(P2C(addr), val);
 	}
 	free(patches);
-	if (!arena_unset)
-	{
-		/* The game's heap must end below the module: OSInit takes this as
-		 * arenaHi and Melee zeroes everything up to it. */
-		write32(0x34, load);
-		sync_after_write((void*)0x0, 0x40);
-		sync_before_read((void*)0x0, 0x40);
-		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top %08x -> %08x (read back %08x), FST %08x\r\n",
-			len, load, n, arena_hi, load, read32(0x34), read32(0x38));
-	}
-	else
-		dbgprintf("TMOD:%u bytes at %08x, %u patches, arena top unset (game default %08x), FST word %08x\r\n",
-			len, load, n, TMOD_DEFAULT_ARENA_HI, read32(0x38));
-	TModReadback("after load", load, len);
-	tmod_stage_len = (len + 31) & ~31;
-	if (tmod_stage == NULL)
-	{
-		u8 *raw = malloc(tmod_stage_len + 32);
-		tmod_stage = raw ? (u8*)(((u32)raw + 31) & ~31) : NULL;
-	}
-	if (tmod_stage)
-	{
-		memset(tmod_stage, 0, tmod_stage_len);
-		memcpy(tmod_stage, (void*)P2C(load), len);
-		sync_after_write(tmod_stage, tmod_stage_len);
-	}
-	else
-		dbgprintf("TMOD:no MEM2 for the staging copy; the PPC will run the ARM-written image\r\n");
+	/* The PPC lowers the arena top to load at entry; 0 (unset) stays 0 and
+	 * the game's default top is below the module (checked above). */
+	dbgprintf("TMOD:%u bytes for %08x, %u patches, arena top %08x, FST word %08x\r\n",
+		len, load, n, arena_hi, read32(0x38));
 	TelemetrySetModule(MOD_LOADED, len, load, n, arena_hi);
 }
 
@@ -4215,7 +4200,7 @@ void PatchGame()
 	{
 		u32 mstate, mlen, mload, mpatches, marena;
 		TelemetryGetModule(&mstate, &mlen, &mload, &mpatches, &marena);
-		if (mstate == MOD_LOADED && tmod_stage)
+		if (mstate == MOD_LOADED)
 		{
 			/* mload is 32-byte aligned (header check) so the staging copy
 			 * and the destination line up. PPC uncached MEM2 = ARM + 0xC0000000
@@ -4225,7 +4210,6 @@ void PatchGame()
 			write32(MOD_FLUSH_LEN, lines);
 			write32(MOD_SRC, (u32)tmod_stage + 0xC0000000);
 			dbgprintf("TMOD:PPC copies %u lines from %08x to %08x at entry\r\n", lines, (u32)tmod_stage + 0xC0000000, mload);
-			TModReadback("before entry", mload, mlen);
 		}
 		else
 		{
