@@ -327,9 +327,9 @@ int _main( int argc, char *argv[] )
 		SlippiNetworkBroadcastInit();
 	}
 
-	// Tournament relay EXI device (RelayEXI.c): spawn the relay thread, whose
-	// only link is the LazyTO beamer on USB. It uses none of the networking
-	// above, which is Slippi's mirroring alone.
+	// Tournament relay EXI device (RelayEXI.c): zero the record gate and spawn
+	// the relay thread, whose only link is the LazyTO beamer on USB. It uses
+	// none of the networking above, which is Slippi's mirroring alone.
 	RelayEXIInit();
 
 /* CONFIG_INIT BOOT STAGE

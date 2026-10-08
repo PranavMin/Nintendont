@@ -10,6 +10,9 @@ Melee weekly pick, play and report their start.gg sets from the Wii itself.
   the USB port (its RAM mailbox past the replay partition) to the LazyTO relay, and the answers
   come back through EXI. The Wii's own network is not used by LazyTO; the station number, the
   relay's address and the secret live on the beamer, so every SD card is the same.
+- **Record gate**: with the kiosk module loaded, Slippi records only the matches the kiosk starts
+  as set games, and tells the kiosk each replay's name. A match that never sent Game End is
+  finished, and the next one is still recorded.
 - **Module loader**: copies `lazyto_kiosk.bin` from the SD card into RAM at boot and applies its
   hooks on top of stock Melee 1.02. The venue's own Slippi codesets still apply.
 - **Station telemetry**: the kernel log and module load result are sent to the relay status page.

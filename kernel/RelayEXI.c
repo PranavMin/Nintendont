@@ -1,7 +1,7 @@
 /* kernel/RelayEXI.c
- * LazyTO relay EXI device (../tournament-reporter/docs/architecture.md,
- * section LazyTO Nintendont; protocol v2: docs/protocol-v2.md and docs/redesign.md
- * in that repo).
+ * LazyTO relay EXI device and record gate (../tournament-reporter/docs/architecture.md,
+ * section LazyTO Nintendont; protocol v2: docs/protocol-v2.md and docs/redesign.md in
+ * that repo).
  *
  * The game (kiosk lbrelayexi.c) selects channel 1 / device 0 (slot B, shared
  * with Slippi's own device), writes a 4-byte immediate command word
@@ -53,6 +53,16 @@
  *     (RelayEXIInit, beamer_usb).
  * Slippi's own network (net.c NetworkInitAsync, console mirroring) is neither
  * touched nor used here: the loader's Network option means mirroring only.
+ *
+ * Record gate (protocol.yaml record_gate, docs/redesign.md "Recording only set
+ * games"): with the kiosk module loaded, the Slippi file writer records only the
+ * matches the kiosk asks for. RelayEXIGateStart runs at each Game Start inside
+ * the EXI DMA handler (SlippiMemoryWrite, kernel/EXI.c:870): it reads the
+ * kiosk's line of the gate, counts the start, publishes the count and keeps
+ * {ring cursor, record, seq} in a small table, with no lock and no wait. The
+ * writer thread looks its new match up there (RelayEXIGateChoice) and, once the
+ * file is valid, publishes which start it opened a file for
+ * (RelayEXIGateOpened), so the kiosk can name the game's replay.
  */
 
 #include "RelayEXI.h"
@@ -80,10 +90,12 @@
 #define RELAY_IDLE_WAIT_MS	50	/* idle USB work waits this long for the USB lock, then tries next time */
 #define RELAY_STARTING_MS	45000	/* after boot or a USB change, "no drive" and "not a beamer" are NB_STARTING this long */
 /* Shown top-right on the kiosk's set list next to the module's own version
- * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
+ * (exi_poll_hdr.host_build), and the kiosk's feature gate
+ * (RECORD_GATE_HOST_BUILD). Bump by hand when a loader release changes
  * behaviour the TO should be able to tell apart on the TV. */
-#define RELAY_HOST_BUILD	7	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream=; 5: beamer transport; 6: the transport bench (branch bench, never merged); 7: protocol v2, the beamer is the only link */
+#define RELAY_HOST_BUILD	7	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream=; 5: beamer transport; 6: the transport bench (branch bench, never merged); 7: protocol v2, the beamer is the only link, the record gate */
 
+RELAY_STATIC_ASSERT(RELAY_HOST_BUILD >= RECORD_GATE_HOST_BUILD, host_build_has_record_gate);
 RELAY_STATIC_ASSERT(sizeof(struct exi_poll_hdr) + RELAY_REPLY_MAX == RELAY_EXI_BUF_SIZE, poll_buf_holds_a_reply);
 
 /* Thread state (template: SlippiNetworkBroadcast.c:19-22) */
@@ -139,6 +151,27 @@ static u32 crash_seen_seq = 0;		/* last seq logged */
 static u32 crash_send_seq = 0;		/* last seq sent as TM_CRASH */
 static struct crash_report crash_copy ALIGNED(32);
 
+/* Record gate (protocol.yaml record_gate): 64 bytes of MEM2, two cache lines.
+ * Line 0 is the kiosk's (want), line 1 the kernel's (start_seq, file_seq,
+ * file_id). The kernel only invalidates line 0 and only flushes line 1, so a
+ * stale copy of the kiosk's word is never written back over it. */
+#define RECORD_GATE_LINE	32
+#define RECORD_CHOICES		4	/* Game Starts the writer may lag behind and still find its choice */
+static volatile struct record_gate *const gate = (volatile struct record_gate *)RECORD_GATE_ARM;
+/* The choice at each Game Start, keyed by the low word of its ring cursor.
+ * Written by the main loop (RelayEXIGateStart), read by the writer thread
+ * (RelayEXIGateChoice): seq is cleared first and set last, so a slot being
+ * rewritten never matches. */
+struct RecordChoice
+{
+	vu32 seq;	/* its start_seq; 0 = empty or being rewritten */
+	vu32 cursor;	/* low word of SlipMemCursor at its RECEIVE_COMMANDS */
+	vu32 record;
+};
+static struct RecordChoice record_choice[RECORD_CHOICES];
+static u32 record_next = 0;		/* main loop only */
+static u32 start_seq = 0;		/* main loop only; mirrored in gate->start_seq */
+
 /* EXI transaction being received on the main loop (reset by RelayEXISelect) */
 static u8 exi_cmd = 0;			/* EXI_RELAY_REQ / EXI_RELAY_POLL / 0 */
 static bool exi_dispatched = false;	/* REQ already handed off; ignore trailing bytes */
@@ -161,6 +194,7 @@ static u8 poll_image[RELAY_EXI_BUF_SIZE] ALIGNED(32);
 RELAY_STATIC_ASSERT(sizeof(struct beamer_req_hdr) + RELAY_REQ_MAX <= BEAMER_SECTOR_SIZE, beamer_req_fits);
 RELAY_STATIC_ASSERT(sizeof(struct beamer_tele_hdr) + sizeof(tele_buf) <= BEAMER_MB_TELE_SECTORS * BEAMER_SECTOR_SIZE, beamer_tele_fits);
 RELAY_STATIC_ASSERT(sizeof(struct beamer_resp_hdr) + RELAY_REPLY_MAX <= sizeof(mb_buf), beamer_resp_fits);
+RELAY_STATIC_ASSERT(offsetof(struct record_gate, start_seq) == RECORD_GATE_LINE, record_gate_two_lines);
 
 /* ------------------------------------------------------------------------- */
 /* EXI hooks: kernel main loop, never block                                  */
@@ -294,6 +328,65 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 	memcpy(ptr, poll_image, len);
 	sync_after_write(ptr, len);
 	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Record gate: Game Start in the EXI DMA handler, the writer thread after   */
+
+bool RelayEXIGateStart(u32 cursor, u32 *seq)
+{
+	struct RecordChoice *c;
+	u32 state, len, load, patches, arena;
+	bool record;
+
+	/* No kiosk module: record everything, as plain Slippi Nintendont does.
+	 * With it: only what the kiosk asked for at this very Game Start. */
+	TelemetryGetModule(&state, &len, &load, &patches, &arena);
+	sync_before_read((void *)RECORD_GATE_ARM, RECORD_GATE_LINE);
+	record = state != MOD_LOADED || gate->want == RECORD_THIS_MATCH;
+
+	gate->start_seq = ++start_seq;
+	sync_after_write((void *)(RECORD_GATE_ARM + RECORD_GATE_LINE), RECORD_GATE_LINE);
+
+	c = &record_choice[record_next++ % RECORD_CHOICES];
+	c->seq = 0;
+	c->cursor = cursor;
+	c->record = record;
+	c->seq = start_seq;
+
+	*seq = start_seq;
+	return record;
+}
+
+bool RelayEXIGateChoice(u32 cursor, u32 *seq)
+{
+	u32 i;
+
+	for (i = 0; i < RECORD_CHOICES; i++)
+	{
+		const struct RecordChoice *c = &record_choice[i];
+		u32 s = c->seq;
+		bool record;
+		if (s == 0 || c->cursor != cursor)
+			continue;
+		record = c->record != 0;
+		if (c->seq != s)
+			continue;	/* rewritten while we read it */
+		*seq = s;
+		return record;
+	}
+	*seq = 0;
+	return true;
+}
+
+void RelayEXIGateOpened(u32 seq, u32 file_id)
+{
+	/* file_id reaches memory before file_seq, so a kiosk that sees its
+	 * match_seq in file_seq reads that match's file_id. */
+	gate->file_id = file_id;
+	sync_after_write((void *)(RECORD_GATE_ARM + RECORD_GATE_LINE), RECORD_GATE_LINE);
+	gate->file_seq = seq;
+	sync_after_write((void *)(RECORD_GATE_ARM + RECORD_GATE_LINE), RECORD_GATE_LINE);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -825,6 +918,11 @@ void RelayEXIInit(void)
 		memset((void *)mb, 0, sizeof(*mb));
 		mb->magic = CRASH_MAGIC;
 	}
+
+	/* The record gate starts empty, before the game runs: nothing wanted, no
+	 * Game Start, no file. */
+	memset((void *)gate, 0, sizeof(*gate));
+	sync_after_write((void *)RECORD_GATE_ARM, sizeof(*gate));
 
 	RelayEXI_Thread = do_thread_create(
 		RelayEXIThread,

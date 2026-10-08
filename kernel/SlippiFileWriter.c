@@ -8,6 +8,7 @@
 
 #include "Config.h"
 #include "usbstorage.h"
+#include "RelayEXI.h"
 
 // use common physical sector size so as to write efficiently
 // and not excessively wear out the underlying flash storage
@@ -219,7 +220,7 @@ static u32 SlippiHandlerThread(void *arg)
 	static u64 memReadPos = 0;
 
 	u32 writtenByteCount = 0;
-	s32 lastFrame;
+	s32 lastFrame = 0;	// the open file's last frame so far, for completeFile
 	driveTimer = read32(HW_TIMER);
 	driveTimerSet = false;
 
@@ -286,6 +287,34 @@ static u32 SlippiHandlerThread(void *arg)
 		{
 			// Read from memory and write to file
 			SlpMemError err = SlippiMemoryRead(&reader, readBuf, READ_BUF_SIZE, memReadPos);
+			if (err == SLP_MEM_UNNEX_NG)
+			{
+				// LazyTO: a match that never sent Game End (a soft reset,
+				// training). readBuf holds its tail, up to the next match's
+				// RECEIVE_COMMANDS at reader.lastReadPos (SlippiMemory.c:124-130,
+				// 185). Write the tail to the open file and resume at that next
+				// match; the new-game path below completes the dangling file.
+				// Jumping to the write cursor, as below, would lose the next
+				// match too.
+				if (currentFileValid)
+				{
+					UINT wrote = 0;
+					FRESULT tailResult = f_lseek(&currentFile, writtenByteCount + 15);
+					if (tailResult == FR_OK)
+						tailResult = f_write(&currentFile, readBuf, reader.lastReadResult.bytesRead, &wrote);
+					if (tailResult != FR_OK || wrote != reader.lastReadResult.bytesRead)
+					{
+						// tried again next cycle, like any data write
+						dbgprintf("Slippi: failed to write the end of a match without Game End, errno: %d\r\n", tailResult);
+						break;
+					}
+					writtenByteCount += wrote;
+					lastFrame = reader.metadata.lastFrame;
+				}
+				dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
+				memReadPos = reader.lastReadPos;
+				continue;
+			}
 			if (err)
 			{
 				// all possible errors render the current file incompletable, so let's jump ahead
@@ -308,7 +337,9 @@ static u32 SlippiHandlerThread(void *arg)
 
 			if (reader.lastReadResult.bytesAvailable < READ_BUF_SIZE && !(currentFileValid && reader.lastReadResult.isGameEnd))
 			{
-				if (replaysLED)
+				// LazyTO: the LED only while a file is being written, not for a
+				// match the kiosk did not ask for
+				if (replaysLED && currentFileValid)
 					flashLED();
 				break;
 			}
@@ -336,39 +367,61 @@ static u32 SlippiHandlerThread(void *arg)
 					currentFileOpen = false;
 				}
 
-				dbgprintf("Creating File...\r\n");
-				gameStartTime = GetCurrentTime();
-				char *fileName = generateFileName();
-				// Maybe can remove FA_READ since network thread doesn't share &currentFile
-				FRESULT fileOpenResult = f_open_secondary_drive(&currentFile, fileName, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
-				if (fileOpenResult != FR_OK)
+				// LazyTO record gate: the choice made at this match's Game Start
+				// (RelayEXI.c RelayEXIGateStart). The read starts at its
+				// RECEIVE_COMMANDS (SlippiMemory.c:132-138), the cursor the
+				// choice was kept under. Not recorded: no file at all, and the
+				// skip path below drains the match.
+				u32 gateSeq;
+				bool record = RelayEXIGateChoice((u32)memReadPos, &gateSeq);
+				if (gateSeq == 0)
+					dbgprintf("Slippi: no record choice for the match at 0x%08x, recording it\r\n", (u32)memReadPos);
+				if (!record)
+					dbgprintf("Slippi: game start %u not recorded\r\n", gateSeq);
+				else
 				{
-					dbgprintf("Slippi: failed to open file: %s, errno: %d\r\n", fileName, fileOpenResult);
-					break;
-				}
+					dbgprintf("Creating File...\r\n");
+					gameStartTime = GetCurrentTime();
+					char *fileName = generateFileName();
+					// Maybe can remove FA_READ since network thread doesn't share &currentFile
+					FRESULT fileOpenResult = f_open_secondary_drive(&currentFile, fileName, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
+					if (fileOpenResult != FR_OK)
+					{
+						dbgprintf("Slippi: failed to open file: %s, errno: %d\r\n", fileName, fileOpenResult);
+						break;
+					}
 
-				currentFileOpen = true;
-				writtenByteCount = 0;
-				
-				FRESULT writeHeaderResult = writeHeader(&currentFile);
-				if (writeHeaderResult != FR_OK)
-				{
-					dbgprintf("Slippi: failed to write header, errno: %d\r\n", writeHeaderResult);
-					break;
-				}
+					currentFileOpen = true;
+					writtenByteCount = 0;
+					lastFrame = 0;
 
-				currentFileValid = true;
+					FRESULT writeHeaderResult = writeHeader(&currentFile);
+					if (writeHeaderResult != FR_OK)
+					{
+						dbgprintf("Slippi: failed to write header, errno: %d\r\n", writeHeaderResult);
+						break;
+					}
+
+					currentFileValid = true;
+					// tell the kiosk which Game Start this file is, and its name
+					if (gateSeq != 0)
+						RelayEXIGateOpened(gateSeq, gameStartTime);
+				}
 			}
 
 			if (!currentFileValid)
 			{
-				// we can reach this state if we SlippiRestoreReadPos into 
-				// the middle of a game due to usb insertion or SlpMemError
+				// we can reach this state if we SlippiRestoreReadPos into
+				// the middle of a game due to usb insertion or SlpMemError,
+				// or for a match the kiosk did not ask for (LazyTO)
 				// skip over and don't write anything until we see the start of a new game
-				if (replaysLED)
-					flashLED();
+				// LazyTO: everything available now, not one chunk per cycle (a
+				// long skipped match could outrun 4 KB per 100 ms, overflow the
+				// ring and lose the next match's start), and without the LED
 				memReadPos += reader.lastReadResult.bytesRead;
-				break;
+				if (reader.lastReadResult.bytesRead == 0)
+					break;
+				continue;
 			}
 
 			// Always seek first in case there was a previous failure with partial write
@@ -391,11 +444,11 @@ static u32 SlippiHandlerThread(void *arg)
 				// Only increment mem read position when the write fully succeeds
 				memReadPos += wrote;
 				writtenByteCount += wrote;
+				lastFrame = reader.metadata.lastFrame;
 
 				if (reader.lastReadResult.isGameEnd)
 				{
 					dbgprintf("Completing File...\r\n");
-					lastFrame = reader.metadata.lastFrame;
 					FRESULT completeResult = completeFile(&currentFile, lastFrame, writtenByteCount);
 					if (completeResult != FR_OK)
 					{

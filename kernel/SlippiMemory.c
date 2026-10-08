@@ -7,6 +7,7 @@
  */
 
 #include "SlippiMemory.h"
+#include "RelayEXI.h"
 #include "common.h"
 #include "debug.h"
 #include "string.h"
@@ -68,8 +69,14 @@ void SlippiMemoryWrite(const u8 *buf, u32 len)
 	{
 		gameState.baseCursor = SlipMemCursor;
 		gameState.inGame = true;
-		dbgprintf("Match %08x started at baseCursor=0x%08x\r\n", 
-				gameState.matchID, (u32)gameState.baseCursor);
+		// LazyTO record gate (RelayEXI.c): the kiosk's choice for this match,
+		// kept under its cursor before the writer can see it (the cursor
+		// moves below)
+		u32 startSeq;
+		bool record = RelayEXIGateStart((u32)SlipMemCursor, &startSeq);
+		dbgprintf("Match %08x started at baseCursor=0x%08x, game start %u, %s\r\n",
+				gameState.matchID, (u32)gameState.baseCursor, startSeq,
+				record ? "recording" : "not recording");
 	}
 	if (command == SLP_CMD_RECEIVE_GAME_END)
 	{
