@@ -462,12 +462,15 @@ static void beamerDown(u8 reason)
 	publishView(&v, 0);
 }
 
-/* A hello read that could not run: the USB lock stayed taken
- * (USB_MB_BUSY), or the mount went away under it (USB_MB_GONE). It changes
+/* A hello read that could not run: the USB lock stayed taken for
+ * RELAY_IDLE_WAIT_MS (USB_MB_BUSY, usbstorage.h:44; usbstorage.c:224-238),
+ * or the mount went away under it (USB_MB_GONE, usbstorage.h:45). It changes
  * nothing, except that "starting" must not outlast its window: a drive that
  * has not let one hello read through by then is not starting, it is not
- * answering (the writer stuck in a SCSI cycle, say), and the kiosk is to say
- * so instead of waiting on NB_STARTING for good. */
+ * answering (the writer holds the lock for a whole SCSI cycle, waiting for it
+ * without a limit, usbstorage.c:212-217, and a beamer recovering its SD card
+ * can hold one cycle up to 30 s, usbstorage.c:199-203), and the kiosk is to
+ * say so instead of waiting on NB_STARTING for good. */
 static void helloMissed(void)
 {
 	if ((shown.flags & PF_NO_BEAMER) && shown.no_beamer_reason == NB_STARTING && !startingWindow())
