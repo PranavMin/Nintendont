@@ -9,8 +9,8 @@
  *   - the kernel main loop, through EXIUpdateRegistersNEW() (kernel/EXI.c),
  *     which must never block: RelayEXISelect/ImmWrite/DMARead only copy
  *     bytes and flip a state word, and RelayEXIGateStart (from
- *     SlippiMemoryWrite in the EXI DMA handler) reads and writes one cache
- *     line each and a small table;
+ *     SlippiMemoryWrite in the EXI DMA handler, kernel/EXI.c:826, 870)
+ *     reads and writes one cache line each and a small table;
  *   - one dedicated kernel thread (RelayEXIInit spawns it) that carries each
  *     request through the beamer's USB mailbox (RelayEXI.c header);
  *   - the Slippi file writer thread (SlippiFileWriter.c), which calls

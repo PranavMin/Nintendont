@@ -199,7 +199,8 @@ static u32 __mount_id = 0;
  * The writer waits for the token as long as it takes. The relay thread waits at
  * most what is left of its request's budget (__usb_lock_within): a beamer can
  * hold one of the writer's SCSI cycles for up to 30 s while it recovers its SD
- * card, and the kiosk is to hear LF_USB_BUSY within 3 s, not wait that out.
+ * card (LazyTO docs/redesign.md, Other mailbox fixes), and the kiosk is to hear
+ * LF_USB_BUSY within 3 s, not wait that out.
  * Booting the game from USB there is no lock (usb_lock stays -1): the main
  * loop (GCNCard_Save) and the DI thread read the drive then, and the relay
  * never touches USB in that mode (RelayEXI.c beamer_usb). */
