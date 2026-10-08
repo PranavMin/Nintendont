@@ -399,7 +399,7 @@ static u32 le32(const u8 *p)
 }
 
 static const char *const reason_names[] = {
-	"usb read failed",			/* NB_UNKNOWN */
+	"usb drive not answering",		/* NB_UNKNOWN */
 	"replays off or the game on usb",	/* NB_REPLAYS_OFF */
 	"no usb drive",				/* NB_NO_DRIVE */
 	"not a lazyto beamer",			/* NB_NOT_LAZYTO */
@@ -434,8 +434,8 @@ static void publishView(const struct exi_poll_hdr *v, u32 fw)
 }
 
 /* True while kernel boot or the last USB change is less than
- * RELAY_STARTING_MS ago. Asked at least once a second, so it latches off long
- * before HW_TIMER wraps. */
+ * RELAY_STARTING_MS ago. serviceBeamer asks on every pass (about once a
+ * second, beamer up or not), so it latches off long before HW_TIMER wraps. */
 static bool startingWindow(void)
 {
 	if (starting && TimerDiffMs(starting_ts) >= RELAY_STARTING_MS)
@@ -460,6 +460,21 @@ static void beamerDown(u8 reason)
 	v.flags = PF_NO_BEAMER;
 	v.no_beamer_reason = reason;
 	publishView(&v, 0);
+}
+
+/* A hello read that could not run: the USB lock stayed taken
+ * (USB_MB_BUSY), or the mount went away under it (USB_MB_GONE). It changes
+ * nothing, except that "starting" must not outlast its window: a drive that
+ * has not let one hello read through by then is not starting, it is not
+ * answering (the writer stuck in a SCSI cycle, say), and the kiosk is to say
+ * so instead of waiting on NB_STARTING for good. */
+static void helloMissed(void)
+{
+	if ((shown.flags & PF_NO_BEAMER) && shown.no_beamer_reason == NB_STARTING && !startingWindow())
+	{
+		dbgprintf("RelayEXI: no hello read got the usb drive within %u ms\r\n", RELAY_STARTING_MS);
+		beamerDown(NB_UNKNOWN);
+	}
 }
 
 /* A valid v2 hello: its state for the requests, the telemetry and the kiosk. */
@@ -527,8 +542,8 @@ static s32 beamerMailbox(u32 mount, u32 size)
 
 /* Idle-thread duty, every RELAY_BEAMER_HELLO_MS: read the hello sector and
  * publish what it says (protocol.yaml beamer_hello, no_beamer_reason).
- * USB_MB_BUSY or USB_MB_GONE leaves everything as it was until the next read.
- * Finding the beamer (the first valid hello, and again on a new USB mount)
+ * USB_MB_BUSY or USB_MB_GONE leaves everything as it was until the next read
+ * (helloMissed: except a "starting" past its window). Finding the beamer (the first valid hello, and again on a new USB mount)
  * also reads the response sector: the beamer outlives a Wii reboot and keeps
  * its last response, so the next request seq starts one past that one
  * (protocol.yaml beamer_req_hdr), or at 1 when the sector holds none. */
@@ -542,9 +557,13 @@ static void serviceBeamer(void)
 	if (!beamer_usb || TimerDiffMs(mb_ts) < RELAY_BEAMER_HELLO_MS)
 		return;
 	mb_ts = read32(HW_TIMER);
+	startingWindow();	/* latch it off in time, whatever the hello says */
 
 	if (USBStorage_Mount(RELAY_IDLE_WAIT_MS, &mount, &size) != USB_MB_OK)
+	{
+		helloMissed();
 		return;
+	}
 	if (mount != seen_mount)
 	{
 		/* The drive went away or another one came: a beamer that is
@@ -566,7 +585,10 @@ static void serviceBeamer(void)
 	if (res == USB_MB_OK && mb_lba != 0)
 		res = USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_HELLO, 1, mb_buf, RELAY_IDLE_WAIT_MS);
 	if (res == USB_MB_BUSY || res == USB_MB_GONE)
+	{
+		helloMissed();
 		return;
+	}
 	if (res != USB_MB_OK)
 	{
 		beamerDown(NB_UNKNOWN);
@@ -591,7 +613,10 @@ static void serviceBeamer(void)
 	{
 		res = USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf + BEAMER_SECTOR_SIZE, RELAY_IDLE_WAIT_MS);
 		if (res == USB_MB_BUSY || res == USB_MB_GONE)
+		{
+			helloMissed();
 			return;
+		}
 		if (res != USB_MB_OK)
 		{
 			beamerDown(NB_UNKNOWN);
