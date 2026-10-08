@@ -288,35 +288,19 @@ static u32 SlippiHandlerThread(void *arg)
 		{
 			// Read from memory and write to file
 			SlpMemError err = SlippiMemoryRead(&reader, readBuf, READ_BUF_SIZE, memReadPos);
-			if (err == SLP_MEM_UNNEX_NG)
-			{
-				// LazyTO: a match that never sent Game End (a soft reset,
-				// training). readBuf holds its tail, up to the next match's
-				// RECEIVE_COMMANDS at reader.lastReadPos (SlippiMemory.c:124-130,
-				// 185). Write the tail to the open file and resume at that next
-				// match; the new-game path below completes the dangling file.
-				// Jumping to the write cursor, as below, would lose the next
-				// match too.
-				if (currentFileValid)
-				{
-					UINT wrote = 0;
-					FRESULT tailResult = f_lseek(&currentFile, writtenByteCount + 15);
-					if (tailResult == FR_OK)
-						tailResult = f_write(&currentFile, readBuf, reader.lastReadResult.bytesRead, &wrote);
-					if (tailResult != FR_OK || wrote != reader.lastReadResult.bytesRead)
-					{
-						// tried again next cycle, like any data write
-						dbgprintf("Slippi: failed to write the end of a match without Game End, errno: %d\r\n", tailResult);
-						break;
-					}
-					writtenByteCount += wrote;
-					lastFrame = reader.metadata.lastFrame;
-				}
-				dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
-				memReadPos = reader.lastReadPos;
-				continue;
-			}
-			if (err)
+			// LazyTO: a match that never sent Game End (a soft reset,
+			// training). readBuf holds the rest of it, up to the next match's
+			// RECEIVE_COMMANDS at reader.lastReadPos (SlippiMemory.c:124-130,
+			// 185), and goes through the same steps as any read below: when
+			// the read began at a match's own start (isNewGame, a match cut
+			// off within its first 4 KB), the dangling file is completed and
+			// that match's record choice decides first, so the bytes land in
+			// the file of the match they belong to, or are skipped. The
+			// writer then resumes at the next match, whose new-game step
+			// completes this file. Jumping to the write cursor, as other
+			// errors do, would lose the next match too.
+			bool cutShort = err == SLP_MEM_UNNEX_NG;
+			if (err && !cutShort)
 			{
 				// all possible errors render the current file incompletable, so let's jump ahead
 				currentFileValid = false;
@@ -336,7 +320,8 @@ static u32 SlippiHandlerThread(void *arg)
 				break;
 			}
 
-			if (reader.lastReadResult.bytesAvailable < READ_BUF_SIZE && !(currentFileValid && reader.lastReadResult.isGameEnd))
+			// (a cut-short match is over: the next one has started)
+			if (!cutShort && reader.lastReadResult.bytesAvailable < READ_BUF_SIZE && !(currentFileValid && reader.lastReadResult.isGameEnd))
 			{
 				// LazyTO: the LED only while a file is being written, not for a
 				// match the kiosk did not ask for
@@ -421,6 +406,8 @@ static u32 SlippiHandlerThread(void *arg)
 				// long skipped match could outrun 4 KB per 100 ms, overflow the
 				// ring and lose the next match's start), and without the LED
 				memReadPos += reader.lastReadResult.bytesRead;
+				if (cutShort)
+					dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
 				if (reader.lastReadResult.bytesRead == 0)
 					break;
 				continue;
@@ -439,6 +426,13 @@ static u32 SlippiHandlerThread(void *arg)
 			if (writeResult != FR_OK)
 			{
 				dbgprintf("Slippi: failed to write data, errno: %d\r\n", writeResult);
+				break;
+			}
+			else if (cutShort && wrote != reader.lastReadResult.bytesRead)
+			{
+				// all or nothing, so the next read still starts at a
+				// command: tried again next cycle, from the same place
+				dbgprintf("Slippi: wrote %u of %u bytes of a match without Game End\r\n", wrote, reader.lastReadResult.bytesRead);
 				break;
 			}
 			else
@@ -492,6 +486,8 @@ static u32 SlippiHandlerThread(void *arg)
 				}
 				else if (replaysLED)
 					flashLED();
+				if (cutShort)
+					dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
 			}
 		}
 	}
