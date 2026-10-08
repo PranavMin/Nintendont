@@ -2,6 +2,12 @@
 
 > Written on branch `reporter`; the current branch is `LazyTO`. Section 4 is superseded
 > and kept, marked, for history.
+>
+> **Protocol v2 (2026-10-07, branch `redesign`)** removes the Wii-network transport described
+> here: the TCP round trip, the beacon listener and request (3.7), the UDP telemetry socket,
+> `lazyto_station.txt` (3.6) and the card's secret. The LazyTO beamer on USB is the only link;
+> it holds the station number and the secret. What the kernel does now is in the header comment
+> of `kernel/RelayEXI.c` and in LazyTO's `docs/protocol-v2.md`.
 
 What was built on branch `reporter` for `../tournament-reporter/docs/architecture.md` section 6.2,
 following `docs/history/relay-exi-investigation.md` (R3: the EXI handler must never block). All

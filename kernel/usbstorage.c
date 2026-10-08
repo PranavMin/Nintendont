@@ -196,10 +196,15 @@ static u32 __mount_id = 0;
  * main loop and the EXI hooks never take it (the boot-time f_mount in main.c
  * does, before any of those threads exists). Not reentrant: only the public
  * entry points below lock, the static helpers they call never do.
+ * The writer waits for the token as long as it takes. The relay thread waits at
+ * most what is left of its request's budget (__usb_lock_within): a beamer can
+ * hold one of the writer's SCSI cycles for up to 30 s while it recovers its SD
+ * card, and the kiosk is to hear LF_USB_BUSY within 3 s, not wait that out.
  * Booting the game from USB there is no lock (usb_lock stays -1): the main
  * loop (GCNCard_Save) and the DI thread read the drive then, and the relay
  * never touches USB in that mode (RelayEXI.c beamer_usb). */
 #define USB_LOCK_TOKEN	((struct ipcmessage *)0x55534221)	/* any non-NULL word */
+#define USB_LOCK_POLL_MS	1	/* __usb_lock_within: try again this often */
 static s32 usb_lock = -1;
 static u32 usb_lock_heap[8] ALIGNED(32);
 
@@ -208,6 +213,27 @@ static void __usb_lock(void)
 	struct ipcmessage *token;
 	if (usb_lock >= 0)
 		mqueue_recv(usb_lock, &token, 0);
+}
+
+/* Take the token within wait_ms or give up. IOS's receive with flags 1 does not
+ * wait and returns a negative error while the queue is empty (the kernel's
+ * non-blocking message flag, as decaf-emu models the Wii U's IOSU; not yet seen
+ * on a Wii), so this waiter polls. The writer's blocking receive (flags 0,
+ * __usb_lock) is untouched. True: the lock is held. */
+static bool __usb_lock_within(u32 wait_ms)
+{
+	struct ipcmessage *token;
+	u32 start;
+	if (usb_lock < 0)
+		return true;
+	start = read32(HW_TIMER);
+	while (mqueue_recv(usb_lock, &token, 1) < 0)
+	{
+		if (TimerDiffMs(start) >= wait_ms)
+			return false;
+		mdelay(USB_LOCK_POLL_MS);
+	}
+	return true;
 }
 
 static void __usb_unlock(void)
@@ -488,36 +514,42 @@ bool USBStorage_WriteSectors(u32 sector, u32 numSectors, const void *buffer)
 	return ok;
 }
 
-u32 USBStorage_Mount(u32 *sector_size)
+s32 USBStorage_Mount(u32 wait_ms, u32 *mount, u32 *sector_size)
 {
-	u32 mount;
-	__usb_lock();
-	mount = __mounted ? __mount_id : 0;
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	*mount = __mounted ? __mount_id : 0;
 	*sector_size = __mounted ? __mounted_device.sector_size : 0;
 	__usb_unlock();
-	return mount;
+	return USB_MB_OK;
 }
 
 /* The check and the cycle under one lock, so a drive swapped in by the
  * hotplug re-probe in between is never read or written. */
-bool USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer)
+s32 USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer, u32 wait_ms)
 {
-	bool ok = false;
-	__usb_lock();
-	if (__mounted && __mount_id == mount)
-		ok = __read_sectors(sector, numSectors, buffer);
+	s32 res;
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	if (!__mounted || __mount_id != mount)
+		res = USB_MB_GONE;
+	else
+		res = __read_sectors(sector, numSectors, buffer) ? USB_MB_OK : USB_MB_FAILED;
 	__usb_unlock();
-	return ok;
+	return res;
 }
 
-bool USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer)
+s32 USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer, u32 wait_ms)
 {
-	bool ok = false;
-	__usb_lock();
-	if (__mounted && __mount_id == mount)
-		ok = __write_sectors(sector, numSectors, buffer);
+	s32 res;
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	if (!__mounted || __mount_id != mount)
+		res = USB_MB_GONE;
+	else
+		res = __write_sectors(sector, numSectors, buffer) ? USB_MB_OK : USB_MB_FAILED;
 	__usb_unlock();
-	return ok;
+	return res;
 }
 
 void USBStorage_Close()

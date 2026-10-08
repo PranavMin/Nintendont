@@ -365,8 +365,8 @@ int dbgprintf( const char *fmt, ...)
 #endif
 
 	// Deal with writes to SD card. FatFS is not reentrant and this is called
-	// from several threads (main at boot, the relay thread for its beacon
-	// requests, DI); two of them inside f_write/f_sync on the same FIL at
+	// from several threads (main at boot, the relay thread, the Slippi
+	// writer, DI); two of them inside f_write/f_sync on the same FIL at
 	// once wedged the main thread at "Kernel Start" (Auto Boot, 2026-09-30).
 	// One writer at a time; a thread that finds the log busy skips the SD
 	// copy of its line (the telemetry ring above still has it). Never wait.

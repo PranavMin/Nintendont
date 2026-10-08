@@ -35,12 +35,17 @@ void USBStorage_UpdateRegisters_MainThread(void);
 bool USBStorage_IsInserted_SlippiThread(void);
 
 /* LazyTO beamer mailbox (RelayEXI.c, relay thread only). USBStorage_Mount
- * returns the mounted drive's id (0 = nothing mounted; a new id per mount, so a
+ * gives the mounted drive's id (0 = nothing mounted; a new id per mount, so a
  * re-inserted or swapped drive is a different one) and its sector size. The
  * Read/WriteMounted calls run the cycle only while that same mount is still
- * there. All three take the USB lock (usbstorage.c). */
-u32 USBStorage_Mount(u32 *sector_size);
-bool USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer);
-bool USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer);
+ * there. All three take the USB lock but wait for it at most wait_ms
+ * (usbstorage.c __usb_lock_within), and return one of these: */
+#define USB_MB_OK	0	/* done */
+#define USB_MB_BUSY	1	/* the USB lock stayed taken for wait_ms; nothing was sent */
+#define USB_MB_GONE	2	/* that mount is gone: removed, or replaced by the hotplug re-probe */
+#define USB_MB_FAILED	3	/* the SCSI cycle failed */
+s32 USBStorage_Mount(u32 wait_ms, u32 *mount, u32 *sector_size);
+s32 USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer, u32 wait_ms);
+s32 USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer, u32 wait_ms);
 
 #endif /* __USBSTORAGE_H__ */

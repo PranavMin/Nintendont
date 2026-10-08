@@ -1,61 +1,58 @@
 /* kernel/RelayEXI.c
- * LazyTO relay EXI device (../tournament-reporter/docs/architecture.md, section
- * LazyTO Nintendont; docs/history/relay-exi-investigation.md).
+ * LazyTO relay EXI device (../tournament-reporter/docs/architecture.md,
+ * section LazyTO Nintendont; protocol v2: docs/protocol-v2.md and docs/redesign.md
+ * in that repo).
  *
- * The game (melee lbrelayexi.c) selects channel 1 / device 0 (slot B, shared
+ * The game (kiosk lbrelayexi.c) selects channel 1 / device 0 (slot B, shared
  * with Slippi's own device), writes a 4-byte immediate command word
  * (EXI_RELAY_REQ or EXI_RELAY_POLL in the top byte, relay_proto.h), then
  *   REQ:  relay_hdr + payload through EXIImmEx, i.e. EXIImm writes of <= 4
  *         bytes each (melee OSExi.c EXIImmEx, lines 168-184); the patched
  *         EXIImm stub (kernel/asm/EXIImm.S:36-41) stores the bytes as an
  *         immediate word, first byte in the top bits;
- *   POLL: one 4096-byte EXIDma read (lbrelayexi.c:110) that must come back
- *         as lbRelayExi_PollBuf: {exi_poll_hdr, relay_hdr, relay_resp,
- *         payload}.
+ *   POLL: one 4096-byte EXIDma read that must come back as
+ *         lbRelayExi_PollBuf: {exi_poll_hdr, relay_hdr, relay_resp, payload}.
  *
- * Contexts (investigation section 1/3): EXI writes are serviced by the kernel
- * main loop (kernel/main.c:583 -> kernel/EXI.c EXIUpdateRegistersNEW) with the
- * game frozen inside the transfer until the ack, so the three hooks below only
- * copy bytes and flip `relay_state`. The TCP round trip runs on the dedicated
- * thread spawned by RelayEXIInit(), template kernel/SlippiNetworkBroadcast.c
- * (own stack in kernel.ld, do_thread_create at prio 0x78).
+ * Contexts: EXI transfers are serviced by the kernel main loop
+ * (kernel/main.c:591 EXIUpdateRegistersNEW -> kernel/EXI.c:743, 782, 863) with
+ * the game frozen inside the transfer until the ack (kernel/EXI.c:886), so
+ * the hooks below only copy bytes and flip `relay_state`. Everything that
+ * touches USB runs on the dedicated thread spawned by RelayEXIInit() (own stack
+ * in kernel.ld:42-43, do_thread_create at prio 0x78).
  *
  * State machine (one request buffer, one thread, no retries):
  *   RELAY_IDLE  --REQ complete-->  RELAY_BUSY  --thread-->  RELAY_DONE
- *                                              \--thread-->  RELAY_ERROR
- *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped.
+ *                                              \--thread-->  RELAY_ERROR + last_fail
+ *   DONE/ERROR are sticky until the next REQ; a REQ while BUSY is dropped; a
+ *   REQ longer than EXI_PAYLOAD_MAX ends RELAY_ERROR with LF_BAD_REQUEST.
  *
- * Relay discovery (../tournament-reporter/docs/decisions.md R15, protocol.yaml
- * relay_beacon): lazyto_station.txt carries no relay address. The relay
- * broadcasts a 12-byte relay_beacon every BEACON_INTERVAL_MS to UDP
- * BEACON_PORT; the same thread, while idle, owns a non-blocking UDP socket
- * bound to that port and takes the latest valid beacon's SOURCE address plus
- * its tcp_port as the relay (relay_ip / relay_port below). Until one arrives
- * both are 0: exi_poll_hdr shows 0 and every request answers ST_INTERNAL
- * "no relay found yet".
- *
- * Shared secret (decisions.md R16, protocol.yaml relay_auth): every TCP request
- * starts with a 20-byte relay_auth carrying lazyto_station.txt's secret=, then
- * the game's relay_hdr + payload. The game never sees it. A card without a
- * valid secret= answers ST_INTERNAL "no secret in station file" locally;
- * a wrong one comes back from the relay as ST_BAD_SECRET.
- *
- * Beamer transport (lazyto_station.txt transport=beamer, protocol.yaml beamer_*):
- * the same bytes travel through a LazyTO beamer, an ESP32 USB mass-storage
- * stick on the Wi-Fi that is also the Slippi replay drive, and the thread
- * opens no IOS socket at all (no beacon, no UDP). The beamer serves
- * BEAMER_MB_SECTORS mailbox sectors from its RAM right after its first FAT32
- * partition (MBR entry type 0x0B/0x0C, start + size, derived again per USB
- * mount). Idle, the thread reads beamer_hello about once a second: its relay
- * address fills exi_poll_hdr, and no drive or no valid hello is PF_NO_BEAMER.
- * Nothing is written to the mailbox before a valid hello, so a plain USB stick
- * is never written there. A request is beamer_req_hdr + relay_auth + relay_hdr
- * + payload in the request sector under a new seq; the response sector is
- * polled every RELAY_BEAMER_POLL_MS until it carries that seq, within the same
- * RELAY_BUDGET_MS. Telemetry datagrams go to the telemetry sectors, one write
- * per tick. The Slippi file writer thread drives the same drive, so
- * usbstorage.c serializes SCSI cycles with its USB lock; USB is in that mode
- * only with replays on and the game on SD (RelayEXIInit, beamer_usb).
+ * The beamer is the only link (docs/redesign.md, The Wii side). A LazyTO beamer
+ * is an ESP32 USB mass-storage stick on the Wi-Fi that is also the Slippi
+ * replay drive. This file opens no IOS socket and reads no file: the station
+ * number, the relay's address and the secret all live on the beamer, so every
+ * SD card is the same. The beamer serves BEAMER_MB_SECTORS mailbox sectors from
+ * its RAM right after its first FAT32 partition (MBR entry type 0x0B/0x0C,
+ * start + size, derived again per USB mount).
+ *   - Idle, the thread reads beamer_hello about once a second (also while a
+ *     game is paused) and publishes it in exi_poll_hdr: the station, the relay,
+ *     the beamer's Wi-Fi and storage, and, without a usable v2 hello,
+ *     PF_NO_BEAMER with no_beamer_reason. Nothing is written to the mailbox
+ *     before a valid v2 hello, so a plain USB stick is never written there.
+ *   - A request is beamer_req_hdr + relay_hdr + payload (no relay_auth: the
+ *     beamer puts its own in front) in the request sector under a new seq,
+ *     with relay_hdr.station stamped from the hello. The response sector is
+ *     polled every RELAY_BEAMER_POLL_MS until it carries that seq, within
+ *     RELAY_BUDGET_MS. Every failure is RELAY_ERROR with a code in
+ *     exi_poll_hdr.last_fail (the beamer's BR_* passed through, or the kernel's
+ *     LF_*); the kiosk picks the words.
+ *   - Telemetry datagrams go to the telemetry sector, one write per tick.
+ *   - The Slippi file writer thread drives the same drive, so usbstorage.c
+ *     serializes SCSI cycles with its USB lock; this thread waits for it at
+ *     most what is left of the request's budget (RELAY_IDLE_WAIT_MS when idle).
+ *     USB is in that mode only with replays on and the game on SD
+ *     (RelayEXIInit, beamer_usb).
+ * Slippi's own network (net.c NetworkInitAsync, console mirroring) is neither
+ * touched nor used here: the loader's Network option means mirroring only.
  */
 
 #include "RelayEXI.h"
@@ -67,118 +64,71 @@
 #include "string.h"
 #include "debug.h"
 #include "syscalls.h"
-#include "net.h"
-#include "ff_utf8.h"
 #include "Telemetry.h"
 #include "Config.h"
 #include "usbstorage.h"
 
-/* Game-side contract, melee/src/melee/lb/lbrelayexi.h. */
+/* Game-side contract, kiosk lbrelayexi.h. */
 #define RELAY_EXI_BUF_SIZE	4096	/* LB_RELAY_EXI_BUF_SIZE */
-#define RELAY_EXI_MAX_PAYLOAD	48	/* LB_RELAY_EXI_MAX_PAYLOAD: report_score_req / end_set_req with 8-byte game_result */
-#define RELAY_REQ_MAX		(sizeof(struct relay_hdr) + RELAY_EXI_MAX_PAYLOAD)
-#define RELAY_RESP_MAX		(RELAY_EXI_BUF_SIZE - sizeof(struct exi_poll_hdr))	/* after the poll header */
+#define RELAY_REQ_MAX		(sizeof(struct relay_hdr) + EXI_PAYLOAD_MAX)
 
 #define RELAY_BUDGET_MS		3000	/* design 4.6: one attempt, 3 s */
 #define RELAY_THREAD_CYCLE_MS	1	/* like SlippiNetwork.c THREAD_CYCLE_TIME_MS */
-#define RELAY_CFG_PATH		"sd:/lazyto_station.txt"	/* the station file in the relay's SD-card zip */
-#define RELAY_CFG_MAX		512
-#define RELAY_RX_CHUNK		1024
-#define RELAY_BEACON_POLL_MS	100	/* idle thread drains the beacon socket this often */
-#define RELAY_BEACON_SETUP_MS	1000	/* socket/bind failed or network not up yet: try again this often */
-#define RELAY_BEACON_DRAIN_MAX	8	/* datagrams read per poll; beacons come every 2 s */
-#define RELAY_BEACON_REQUEST_MS	2000	/* while no beacon has been heard, ask for one this often */
 #define RELAY_TELEMETRY_TICK_MS	100	/* idle thread sends telemetry this often */
 #define RELAY_BEAMER_HELLO_MS	1000	/* idle thread reads the beamer's hello this often */
 #define RELAY_BEAMER_POLL_MS	10	/* a request reads the response sector this often */
+#define RELAY_IDLE_WAIT_MS	50	/* idle USB work waits this long for the USB lock, then tries next time */
+#define RELAY_STARTING_MS	45000	/* after boot or a USB change, "no drive" and "not a beamer" are NB_STARTING this long */
 /* Shown top-right on the kiosk's set list next to the module's own version
  * (exi_poll_hdr.host_build). Bump by hand when a loader release changes
  * behaviour the TO should be able to tell apart on the TV. */
-#define RELAY_HOST_BUILD	5	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream=; 5: beamer transport */
-#define RELAY_TELEMETRY_CHUNKS	4	/* TM_LOG datagrams per tick at most */
+#define RELAY_HOST_BUILD	7	/* 2: network init off the boot path, PF_NET_JOINING; 3: EINPROGRESS 26 and IOS poll bits (connect to a relay on another host); 4: lazyto_kiosk.bin / lazyto_station.txt, no stream=; 5: beamer transport; 6: the transport bench (branch bench, never merged); 7: protocol v2, the beamer is the only link */
 
-/* IOCTL_SO_FCNTL (net.h:105) usage copied from libogc network_wii.c
- * net_fcntl(): params = {socket, cmd, flags}, ioctl input length 12, no
- * output. cmd is the POSIX F_GETFL (3) / F_SETFL (4) passed straight through;
- * IOS_O_NONBLOCK is libogc's "(O_NONBLOCK >> 16)" = 0x04. Nothing else in
- * this kernel uses FCNTL (investigation section 3 caveat, decisions.md R9). */
-#define RELAY_F_GETFL		3
-#define RELAY_F_SETFL		4
-#define RELAY_IOS_O_NONBLOCK	0x04
-
-/* IOS socket error codes, negated on return. Dolphin
- * Source/Core/Core/IOS/Network/Socket.h `WiiSockets` (same order as libogc's
- * errmap): EAGAIN 6, EALREADY 7, EINPROGRESS 26 (NOT 27, which is EINTR:
- * the table is alphabetical from E2BIG = 1; Dolphin IPC_HLE/WII_Socket.h
- * has the same enum). With 27 every connect() that did not complete
- * synchronously was treated as a failure - against a relay on the same
- * PC that was rare, against the Pi it was every time (NO LINK TO THE
- * RELAY, 2026-10-01). */
-#define RELAY_SO_EAGAIN		6
-#define RELAY_SO_EALREADY	7
-#define RELAY_SO_EINPROGRESS	26
-#define RELAY_CONNECT_SLICE_MS	50	/* poll slice while a connect is in progress (see doRoundTrip) */
-
-/* From kernel/net.c */
-extern s32 top_fd;
-extern u32 NetworkStarted;
+RELAY_STATIC_ASSERT(sizeof(struct exi_poll_hdr) + RELAY_REPLY_MAX == RELAY_EXI_BUF_SIZE, poll_buf_holds_a_reply);
 
 /* Thread state (template: SlippiNetworkBroadcast.c:19-22) */
 static u32 RelayEXI_Thread;
 extern char __relay_exi_stack_addr, __relay_exi_stack_size;
 static u32 RelayEXIThread(void *arg);
 
-/* sd:/lazyto_station.txt */
-struct RelayCfg {
-	u16	station;	/* station */
-	bool	ok;		/* false: missing or malformed -> ST_INTERNAL "no station file" */
-	bool	has_secret;	/* false: no valid secret= -> ST_INTERNAL "no secret in station file" */
-	bool	beamer;		/* transport=beamer: the USB mailbox instead of IOS sockets */
-	char	secret[SECRET_LEN];	/* NUL-padded, as relay_auth carries it */
-};
-static struct RelayCfg cfg;
-static char cfg_text[RELAY_CFG_MAX] ALIGNED(32);
+/* What exi_poll_hdr says about the beamer (flags, station, relay_ip,
+ * relay_port, no_beamer_reason, beamer_wifi, beamer_storage; the poll path adds
+ * state, host_opts, host_build and last_fail). The relay thread writes the slot
+ * the poll path is not reading and then flips view_cur, so one poll never shows
+ * half of one hello and half of the next. */
+static struct exi_poll_hdr view[2];
+static vu32 view_cur = 0;
+static struct exi_poll_hdr shown;	/* the last view published, for the log (relay thread) */
+static u32 shown_fw = 0;
 
-/* The relay as the latest valid relay_beacon announced it (with the beamer:
- * as the latest valid beamer_hello reports it); 0 = none heard yet. Written
- * only by the relay thread (serviceBeacon, serviceBeamer); read by the thread
- * for the next round trip and by the poll path (main loop) for
- * exi_poll_hdr. Host order = wire order (the kernel is big-endian). */
-static vu32 relay_ip = 0;
-static vu32 relay_port = 0;
-static s32 beacon_sock = -1;		/* UDP socket bound to BEACON_PORT, -1 until set up */
-/* Beacon request (protocol.yaml relay_beacon): some access points never
- * deliver the relay's broadcast to this power-saving Wi-Fi client (first
- * venue-style Wi-Fi test, 2026-09-30: pings answered, no beacon in minutes).
- * So while relay_ip is 0 we broadcast a relay_beacon with tcp_port 0 to
- * TELEMETRY_PORT every RELAY_BEACON_REQUEST_MS; the relay answers unicast to
- * our BEACON_PORT, where serviceBeacon already listens. A connected UDP socket
- * to 255.255.255.255, the way SlippiNetworkBroadcast.c sends its own. */
-static s32 request_sock = -1;
-static u32 request_ts = 0;
-static u32 request_count = 0;
-static struct relay_beacon request_msg ALIGNED(32);
-static struct sockaddr_in request_addr ALIGNED(32) = {
-	.sin_family = AF_INET,
-	.sin_port = TELEMETRY_PORT,
-	{
-		.s_addr = 0xffffffff,
-	},
-};
-static u32 beacon_ts = 0;		/* HW_TIMER of the last setup attempt or drain */
-static u8 beacon_rx[32] ALIGNED(32);	/* recvfrom target; > sizeof(relay_beacon) so oversize datagrams show */
+/* The beamer as the latest hello read showed it. Relay thread only. */
+static bool beamer_usb = false;		/* USB is up as the hotswap replay drive (RelayEXIInit) */
+static bool beamer_up = false;		/* the last hello read was a valid v2 hello */
+static u8 hello_flags = 0;		/* its beamer_flags; 0 while !beamer_up */
+static u16 hello_station = 0;		/* its station, 0 without BF_STATION_SET */
+static u32 relay_ip = 0;		/* its relay address, 0 without BF_RELAY */
+static u32 starting_ts = 0;		/* HW_TIMER of kernel boot or of the last USB change */
+static bool starting = true;		/* within RELAY_STARTING_MS of starting_ts (latched off: HW_TIMER wraps) */
+static u32 seen_mount = 0;		/* USBStorage_Mount id the last hello read saw; 0 = no drive */
+static u32 mb_mount = 0;		/* USBStorage_Mount id mb_lba belongs to; 0 = none yet */
+static u32 mb_lba = 0;			/* first mailbox sector on that mount; 0 = not a beamer */
+static u32 mb_ts = 0;			/* HW_TIMER of the last hello read */
+static u32 mb_seq = 0;			/* beamer_req_hdr.seq of the last request (serviceBeamer seeds it) */
+static u32 mb_seq_mount = 0;		/* mount mb_seq was seeded on */
+static u32 mb_tele_seq = 0;		/* beamer_tele_hdr.seq of the last datagram */
+static u8 mb_buf[BEAMER_MB_RESP_SECTORS * BEAMER_SECTOR_SIZE] ALIGNED(32);	/* every mailbox read and write */
 
 /* Station telemetry (protocol.yaml telemetry_hdr): the kernel log and the
- * module's load result, to the relay's TELEMETRY_PORT. Relay thread only. */
-static s32 tele_sock = -1;		/* UDP socket connected to tele_ip:TELEMETRY_PORT */
-static u32 tele_ip = 0;
+ * module's load result, through the beamer to the relay's TELEMETRY_PORT.
+ * Relay thread only. */
+static u32 tele_ip = 0;			/* relay the last TM_STATUS went to */
 static u32 tele_ts = 0;			/* HW_TIMER of the last tick */
 static u32 tele_uptime = 0;		/* ms since RelayEXIInit, summed per tick (HW_TIMER wraps) */
 static u32 tele_status_ms = 0;		/* ms since the last TM_STATUS */
 static bool tele_status_due = true;
 static u32 tele_sent_state = 0xFFFFFFFF;	/* module_state in the last TM_STATUS */
 static u32 tele_seq = 0;
-static u8 tele_buf[sizeof(struct relay_auth) + sizeof(struct telemetry_hdr) + TELEMETRY_TEXT_MAX] ALIGNED(32);
+static u8 tele_buf[sizeof(struct telemetry_hdr) + TELEMETRY_TEXT_MAX] ALIGNED(32);
 
 /* Crash mailbox (protocol.yaml crash_mailbox): the game's module writes a
  * crash_report here from its OS error handler; CRASH_MAILBOX_PPC is the PPC's
@@ -189,20 +139,6 @@ static u32 crash_seen_seq = 0;		/* last seq logged */
 static u32 crash_send_seq = 0;		/* last seq sent as TM_CRASH */
 static struct crash_report crash_copy ALIGNED(32);
 
-/* Beamer transport (protocol.yaml beamer_*). Relay thread only, except
- * beamer_up, which the poll path reads for PF_NO_BEAMER. */
-static bool beamer_usb = false;		/* USB is up as the hotswap replay drive (RelayEXIInit) */
-static vu32 beamer_up = 0;		/* the last hello read was valid */
-static u32 mb_mount = 0;		/* USBStorage_Mount id mb_lba belongs to; 0 = none yet */
-static u32 mb_lba = 0;			/* first mailbox sector on that mount; 0 = not a beamer */
-static u32 mb_hello_logged = 0;		/* mount whose missing hello was logged */
-static u32 mb_fw = 0;			/* fw_build of the last valid hello, for the log */
-static u32 mb_ts = 0;			/* HW_TIMER of the last hello read */
-static u32 mb_seq = 0;			/* beamer_req_hdr.seq of the last request (serviceBeamer seeds it) */
-static u32 mb_seq_mount = 0;		/* mount mb_seq was seeded on */
-static u32 mb_tele_seq = 0;		/* beamer_tele_hdr.seq of the last datagram */
-static u8 mb_buf[BEAMER_MB_RESP_SECTORS * BEAMER_SECTOR_SIZE] ALIGNED(32);	/* every mailbox read and write */
-
 /* EXI transaction being received on the main loop (reset by RelayEXISelect) */
 static u8 exi_cmd = 0;			/* EXI_RELAY_REQ / EXI_RELAY_POLL / 0 */
 static bool exi_dispatched = false;	/* REQ already handed off; ignore trailing bytes */
@@ -211,152 +147,20 @@ static u32 stage_len = 0;
 
 /* The one request in flight and its response. Written by the main loop only
  * while relay_state != RELAY_BUSY; read/written by the thread only while
- * relay_state == RELAY_BUSY. */
+ * relay_state == RELAY_BUSY. last_fail is written before relay_state. */
 static vu32 relay_state = RELAY_IDLE;	/* enum exi_poll_state */
+static vu32 last_fail = LF_NONE;	/* enum relay_fail or a beamer_result: the last RELAY_ERROR's reason */
 static u8 req_buf[RELAY_REQ_MAX] ALIGNED(32);
 static u32 req_len = 0;
-static u8 send_buf[sizeof(struct relay_auth) + RELAY_REQ_MAX] ALIGNED(32);	/* relay_auth + req_buf, one sendto */
-static u8 resp_buf[RELAY_RESP_MAX] ALIGNED(32);
+static u8 resp_buf[RELAY_REPLY_MAX] ALIGNED(32);
 static u32 resp_len = 0;
-static u8 rx_chunk[RELAY_RX_CHUNK] ALIGNED(32);	/* 32-byte aligned recvfrom target */
 static u8 poll_image[RELAY_EXI_BUF_SIZE] ALIGNED(32);
 
 /* What the mailbox must hold: a request in one sector, a datagram in the
  * telemetry sectors, and every reply the game's poll buffer can take. */
-RELAY_STATIC_ASSERT(sizeof(struct beamer_req_hdr) + sizeof(send_buf) <= BEAMER_SECTOR_SIZE, beamer_req_fits);
+RELAY_STATIC_ASSERT(sizeof(struct beamer_req_hdr) + RELAY_REQ_MAX <= BEAMER_SECTOR_SIZE, beamer_req_fits);
 RELAY_STATIC_ASSERT(sizeof(struct beamer_tele_hdr) + sizeof(tele_buf) <= BEAMER_MB_TELE_SECTORS * BEAMER_SECTOR_SIZE, beamer_tele_fits);
-RELAY_STATIC_ASSERT(sizeof(struct beamer_resp_hdr) + RELAY_RESP_MAX == sizeof(mb_buf), beamer_resp_fits);
-
-/* ------------------------------------------------------------------------- */
-/* lazyto_station.txt                                                        */
-
-/* Parse an unsigned decimal <= max: digits only, at least one, then only
- * trailing whitespace. */
-static bool parseU32(const char *s, u32 max, u32 *out)
-{
-	u32 v = 0;
-	u32 n = 0;
-	while (*s >= '0' && *s <= '9')
-	{
-		v = v * 10 + (u32)(*s - '0');
-		if (v > max)
-			return false;
-		s++;
-		n++;
-	}
-	if (n == 0)
-		return false;
-	while (*s == ' ' || *s == '\t' || *s == '\r')
-		s++;
-	*out = v;
-	return *s == 0;
-}
-
-/* secret=: 8 to SECRET_LEN of A-Z a-z 0-9 - _ (the relay's config.ts rule),
- * then only trailing whitespace. Stored NUL-padded. */
-static bool parseSecret(const char *s, char *out)
-{
-	u32 n = 0;
-	memset(out, 0, SECRET_LEN);
-	while ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') ||
-	       *s == '-' || *s == '_')
-	{
-		if (n == SECRET_LEN)
-			return false;
-		out[n++] = *s++;
-	}
-	while (*s == ' ' || *s == '\t' || *s == '\r')
-		s++;
-	return *s == 0 && n >= 8;
-}
-
-/* Exactly `word`, then only trailing whitespace. */
-static bool parseWord(const char *s, const char *word)
-{
-	u32 n = strlen(word);
-	if (strncmp(s, word, n) != 0)
-		return false;
-	s += n;
-	while (*s == ' ' || *s == '\t' || *s == '\r')
-		s++;
-	return *s == 0;
-}
-
-/* key=value lines: station (required) and secret, unknown keys ignored, blank
- * lines ignored. The relay picks the stream station itself, so a stream= line
- * is just an unknown key. transport= is network (also when absent, so older
- * cards keep working) or beamer; anything else is malformed. */
-static bool parseCfg(char *text)
-{
-	bool have_station = false, transport_ok = true;
-	char *line = text;
-
-	while (*line)
-	{
-		char *next = strchr(line, '\n');
-		char *eq;
-		u32 v = 0;	/* parseU32 leaves it untouched on failure */
-		if (next)
-			*next++ = 0;
-		else
-			next = line + strlen(line);
-
-		eq = strchr(line, '=');
-		if (eq)
-		{
-			const char *val = eq + 1;
-			*eq = 0;
-			if (strcmp(line, "secret") == 0)
-				cfg.has_secret = parseSecret(val, cfg.secret);
-			else if (strcmp(line, "station") == 0)
-			{
-				have_station = parseU32(val, 65535, &v);
-				cfg.station = (u16)v;
-			}
-			else if (strcmp(line, "transport") == 0)
-			{
-				cfg.beamer = parseWord(val, "beamer");
-				transport_ok = cfg.beamer || parseWord(val, "network");
-			}
-		}
-		line = next;
-	}
-	return have_station && transport_ok;
-}
-
-/* Pattern B from the investigation (kernel/Config.c ConfigInit: FatFS open +
- * f_read at boot), except that a missing/short/malformed file sets cfg.ok =
- * false instead of Shutdown(). */
-static void loadCfg(void)
-{
-	FIL fp;
-	UINT read = 0;
-
-	memset(&cfg, 0, sizeof(cfg));
-	if (f_open_char(&fp, RELAY_CFG_PATH, FA_READ | FA_OPEN_EXISTING) != FR_OK)
-	{
-		dbgprintf("RelayEXI: %s not found\r\n", RELAY_CFG_PATH);
-		return;
-	}
-	if (fp.obj.objsize >= RELAY_CFG_MAX)
-	{
-		dbgprintf("RelayEXI: %s too large (%u bytes)\r\n", RELAY_CFG_PATH, (u32)fp.obj.objsize);
-		f_close(&fp);
-		return;
-	}
-	f_read(&fp, cfg_text, RELAY_CFG_MAX - 1, &read);
-	f_close(&fp);
-	cfg_text[read] = 0;
-
-	cfg.ok = parseCfg(cfg_text);
-	if (cfg.ok)
-		dbgprintf("RelayEXI: station %u secret %s, %s\r\n",
-			cfg.station, cfg.has_secret ? "set" : "MISSING",
-			cfg.beamer ? "transport beamer (relay address from the beamer on usb)"
-				: "transport network (relay address from its beacon)");
-	else
-		dbgprintf("RelayEXI: %s malformed\r\n", RELAY_CFG_PATH);
-}
+RELAY_STATIC_ASSERT(sizeof(struct beamer_resp_hdr) + RELAY_REPLY_MAX <= sizeof(mb_buf), beamer_resp_fits);
 
 /* ------------------------------------------------------------------------- */
 /* EXI hooks: kernel main loop, never block                                  */
@@ -381,6 +185,19 @@ static void dispatchRequest(void)
 	req_len = stage_len;
 	resp_len = 0;
 	relay_state = RELAY_BUSY;	/* the handoff; the thread polls this */
+}
+
+/* A request longer than the staging buffer: RELAY_ERROR with LF_BAD_REQUEST,
+ * so the kiosk can say so. Main loop context. */
+static void rejectRequest(void)
+{
+	if (relay_state == RELAY_BUSY)
+	{
+		dbgprintf("RelayEXI: request while busy, dropped\r\n");
+		return;
+	}
+	last_fail = LF_BAD_REQUEST;
+	relay_state = RELAY_ERROR;
 }
 
 bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
@@ -422,7 +239,8 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 		u32 want = sizeof(struct relay_hdr) + h->len;
 		if (want > RELAY_REQ_MAX)
 		{
-			dbgprintf("RelayEXI: bad request len %u, ignored\r\n", h->len);
+			dbgprintf("RelayEXI: request payload %u over %u bytes, refused\r\n", h->len, EXI_PAYLOAD_MAX);
+			rejectRequest();
 			exi_dispatched = true;
 		}
 		else if (stage_len == want)
@@ -436,6 +254,8 @@ bool RelayEXIImmWrite(u32 data, u32 len, u32 mode)
 
 bool RelayEXIDMARead(u8 *ptr, u32 len)
 {
+	u32 state;
+
 	if (exi_cmd != EXI_RELAY_POLL)
 		return false;
 	exi_cmd = 0;
@@ -445,33 +265,26 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 
 	/* Build in kernel RAM, then one aligned copy into MEM1 (Starlet needs
 	 * 32-bit MEM1 writes, kernel/common.h:36-42; same shape as
-	 * EXIReadFontFile, kernel/EXI.c:903-907). Zero buffer unless DONE. */
+	 * EXIReadFontFile, kernel/EXI.c:928-931). Zero buffer unless DONE. */
 	memset(poll_image, 0, len);
-	/* exi_poll_hdr (protocol.yaml): state plus where this station is, so the
-	 * game can print STATION n / RELAY a.b.c.d even while the relay is down.
-	 * The kernel is big-endian like the wire, so the struct is written as is. */
+	state = relay_state;	/* before last_fail: the thread writes last_fail first */
 	if (len >= sizeof(struct exi_poll_hdr))
 	{
+		/* exi_poll_hdr (protocol.yaml): the beamer's state from its latest
+		 * hello, so the kiosk can say what is wrong even while the relay
+		 * never answers. The kernel is big-endian like the wire, so the
+		 * struct is written as is. */
 		struct exi_poll_hdr *ph = (struct exi_poll_hdr *)poll_image;
-		ph->state = (u8)relay_state;
-		/* What this host already knows is wrong (exi_poll_flags), so the
-		 * kiosk can say "no network" instead of waiting for a beacon. The
-		 * beamer transport never uses the Wii's network: only PF_NO_BEAMER. */
-		ph->flags = (cfg.beamer ? (beamer_up ? 0 : PF_NO_BEAMER)
-				: NetworkStarted ? 0
-				: ConfigGetConfig(NIN_CFG_NETWORK) ? PF_NET_JOINING : PF_NO_NETWORK)
-			| (cfg.ok ? 0 : PF_NO_CFG)
-			| (cfg.has_secret ? 0 : PF_NO_SECRET);
-		ph->station = cfg.station;
-		ph->relay_ip = relay_ip;		/* 0 until a beacon (or a hello with BF_RELAY) is heard */
-		ph->relay_port = (u16)relay_port;
+		memcpy(ph, &view[view_cur], sizeof(*ph));
+		ph->state = (u8)state;
 		ph->host_opts = (ConfigGetConfig(NIN_CFG_MELEE_MUSIC) ? HO_MUSIC_ON : 0)
 			| (ConfigGetConfig(NIN_CFG_MELEE_STEREO) ? HO_STEREO : 0);
 		ph->host_build = RELAY_HOST_BUILD;
+		ph->last_fail = (u8)last_fail;
 	}
 	else
-		poll_image[0] = (u8)relay_state;
-	if (relay_state == RELAY_DONE && len > sizeof(struct exi_poll_hdr))
+		poll_image[0] = (u8)state;
+	if (state == RELAY_DONE && len > sizeof(struct exi_poll_hdr))
 	{
 		u32 n = resp_len;
 		if (n > len - sizeof(struct exi_poll_hdr))
@@ -484,244 +297,260 @@ bool RelayEXIDMARead(u8 *ptr, u32 len)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Relay thread                                                              */
+/* Relay thread: the beamer's hello                                          */
 
-/* A kernel-generated failure the game should show as text: relay_hdr echoing
- * the request, relay_resp with ST_INTERNAL and msg. */
-static void synthResponse(const char *msg)
+/* Little-endian u32, as the MBR stores it (the kernel is big-endian). */
+static u32 le32(const u8 *p)
 {
-	struct relay_hdr *h = (struct relay_hdr *)resp_buf;
-	struct relay_resp *r = (struct relay_resp *)(resp_buf + sizeof(struct relay_hdr));
-
-	memcpy(h, req_buf, sizeof(struct relay_hdr));
-	h->len = sizeof(struct relay_resp);
-	memset(r, 0, sizeof(struct relay_resp));
-	r->status = ST_INTERNAL;
-	strncpy(r->msg, msg, MSG_LEN);
-	resp_len = sizeof(struct relay_hdr) + sizeof(struct relay_resp);
+	return p[0] | (p[1] << 8) | (p[2] << 16) | ((u32)p[3] << 24);
 }
 
-/* relay_auth with lazyto_station.txt's secret= at dst (decisions.md R16): ahead
- * of every request and every telemetry datagram, on either transport. */
-static void putAuth(u8 *dst)
+static const char *const reason_names[] = {
+	"usb read failed",			/* NB_UNKNOWN */
+	"replays off or the game on usb",	/* NB_REPLAYS_OFF */
+	"no usb drive",				/* NB_NO_DRIVE */
+	"not a lazyto beamer",			/* NB_NOT_LAZYTO */
+	"old beamer firmware",			/* NB_OLD_FIRMWARE */
+	"waiting for the beamer",		/* NB_STARTING */
+	"newer beamer firmware than this loader",	/* NB_NEW_FIRMWARE */
+};
+
+/* Publish what exi_poll_hdr is to say about the beamer, and log a change. */
+static void publishView(const struct exi_poll_hdr *v, u32 fw)
 {
-	struct relay_auth *auth = (struct relay_auth *)dst;
-	memset(auth, 0, sizeof(*auth));
-	auth->magic[0] = AUTH_MAGIC_0;
-	auth->magic[1] = AUTH_MAGIC_1;
-	memcpy(auth->secret, cfg.secret, SECRET_LEN);
-}
-
-/* relay_auth then the game's request at dst: the bytes either transport
- * hands to the relay. Returns their count. */
-static u32 putRequest(u8 *dst)
-{
-	putAuth(dst);
-	memcpy(dst + sizeof(struct relay_auth), req_buf, req_len);
-	return sizeof(struct relay_auth) + req_len;
-}
-
-static s32 relay_fcntl(s32 sock, u32 cmd, u32 flags)
-{
-	STACK_ALIGN(u32, params, 3, 32);
-	params[0] = (u32)sock;
-	params[1] = cmd;
-	params[2] = flags;
-	return IOS_Ioctl(top_fd, IOCTL_SO_FCNTL, params, 12, NULL, 0);
-}
-
-/* recvfrom that also returns the sender's address, which kernel/net.c:263
- * recvfrom does not (it passes a NULL third vector, net.c:278-279). Vector
- * layout from libogc network_wii.c net_recvfrom: one input vector (socket,
- * flags) and two outputs (data, source sockaddr). `mem` and `from` must be
- * 32-byte aligned. */
-static s32 recvfromAddr(s32 sock, void *mem, s32 len, struct sockaddr_in *from)
-{
-	STACK_ALIGN(u32, params, 2, 32);
-	STACK_ALIGN(ioctlv, vec, 3, 32);
-
-	params[0] = (u32)sock;
-	params[1] = 0;
-	vec[0].data = params;
-	vec[0].len = 8;
-	vec[1].data = mem;
-	vec[1].len = len;
-	vec[2].data = from;
-	vec[2].len = 8;
-	return IOS_Ioctlv(top_fd, IOCTLV_SO_RECVFROM, 1, 2, vec);
-}
-
-/* UDP socket on BEACON_PORT, any address, non-blocking (same FCNTL as the TCP
- * connect, relay_fcntl below). On failure beacon_sock stays -1 and
- * serviceBeacon tries again after RELAY_BEACON_SETUP_MS. */
-static s32 relay_fcntl(s32 sock, u32 cmd, u32 flags);
-static void beaconSetup(void)
-{
-	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
-	s32 sock, res, flags;
-
-	sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
-	if (sock < 0)
+	if (memcmp(v, &shown, sizeof(shown)) != 0 || fw != shown_fw)
 	{
-		dbgprintf("RelayEXI: beacon socket failed (%d)\r\n", sock);
-		return;
-	}
-	memset(addr, 0, sizeof(*addr));
-	addr->sin_family = AF_INET;
-	addr->sin_port = BEACON_PORT;
-	addr->sin_addr.s_addr = INADDR_ANY;
-	res = bind(top_fd, sock, (struct sockaddr *)addr);
-	if (res < 0)
-	{
-		dbgprintf("RelayEXI: beacon bind udp %u failed (%d)\r\n", BEACON_PORT, res);
-		close(top_fd, sock);
-		return;
-	}
-	flags = relay_fcntl(sock, RELAY_F_GETFL, 0);
-	if (flags < 0)
-		flags = 0;
-	relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
-	beacon_sock = sock;
-	dbgprintf("RelayEXI: listening for relay beacons on udp %u\r\n", BEACON_PORT);
-
-	/* The request sender: a UDP socket connected to the broadcast address. */
-	sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
-	if (sock >= 0)
-	{
-		if (connect(top_fd, sock, (struct sockaddr *)&request_addr) < 0)
-		{
-			dbgprintf("RelayEXI: beacon request socket connect failed\r\n");
-			close(top_fd, sock);
-		}
+		if (v->flags & PF_NO_BEAMER)
+			dbgprintf("RelayEXI: no beamer: %s\r\n",
+				v->no_beamer_reason < sizeof(reason_names) / sizeof(reason_names[0])
+					? reason_names[v->no_beamer_reason] : "?");
 		else
-		{
-			memset(&request_msg, 0, sizeof(request_msg));
-			request_msg.magic[0] = RELAY_MAGIC_0;
-			request_msg.magic[1] = RELAY_MAGIC_1;
-			request_msg.version = RELAY_PROTO_VERSION;
-			request_sock = sock;	/* tcp_port 0, event_id 0 = "please send it" */
-			request_ts = read32(HW_TIMER);
-		}
+			dbgprintf("RelayEXI: beamer fw %u, station %u%s%s%s, wifi %u, storage %u, relay %u.%u.%u.%u:%u\r\n",
+				fw, v->station,
+				(v->flags & PF_NO_STATION) ? " (none set)" : "",
+				(v->flags & PF_NO_SECRET) ? ", no secret" : "",
+				(v->flags & PF_RELAY_STALE) ? ", beacon stale" : "",
+				v->beamer_wifi, v->beamer_storage,
+				v->relay_ip >> 24, (v->relay_ip >> 16) & 0xFF, (v->relay_ip >> 8) & 0xFF,
+				v->relay_ip & 0xFF, v->relay_port);
+		memcpy(&shown, v, sizeof(shown));
+		shown_fw = fw;
 	}
+	memcpy(&view[view_cur ^ 1], v, sizeof(*v));
+	view_cur ^= 1;
 }
 
-/* While no beacon has arrived: ask. Nothing to do once relay_ip is known. */
-static void requestBeacon(void)
+/* True while kernel boot or the last USB change is less than
+ * RELAY_STARTING_MS ago. Asked at least once a second, so it latches off long
+ * before HW_TIMER wraps. */
+static bool startingWindow(void)
+{
+	if (starting && TimerDiffMs(starting_ts) >= RELAY_STARTING_MS)
+		starting = false;
+	return starting;
+}
+
+/* No usable beamer: PF_NO_BEAMER and why. Within the starting window "no
+ * drive" and "not a beamer" are NB_STARTING instead: a beamer that is still
+ * booting, erasing or joining the Wi-Fi is not missing. */
+static void beamerDown(u8 reason)
+{
+	struct exi_poll_hdr v;
+
+	if ((reason == NB_NO_DRIVE || reason == NB_NOT_LAZYTO) && startingWindow())
+		reason = NB_STARTING;
+	beamer_up = false;
+	hello_flags = 0;
+	hello_station = 0;
+	relay_ip = 0;
+	memset(&v, 0, sizeof(v));
+	v.flags = PF_NO_BEAMER;
+	v.no_beamer_reason = reason;
+	publishView(&v, 0);
+}
+
+/* A valid v2 hello: its state for the requests, the telemetry and the kiosk. */
+static void beamerUp(const struct beamer_hello *h)
+{
+	struct exi_poll_hdr v;
+
+	beamer_up = true;
+	hello_flags = h->flags;
+	hello_station = (h->flags & BF_STATION_SET) ? h->station : 0;
+	relay_ip = (h->flags & BF_RELAY) ? h->relay_ip : 0;
+
+	memset(&v, 0, sizeof(v));
+	v.flags = ((h->flags & BF_STATION_SET) ? 0 : PF_NO_STATION)
+		| ((h->flags & BF_SECRET) ? 0 : PF_NO_SECRET)
+		| (((h->flags & BF_RELAY) && h->beacon_age_s > BEACON_STALE_S) ? PF_RELAY_STALE : 0);
+	v.station = hello_station;
+	v.relay_ip = relay_ip;
+	v.relay_port = (h->flags & BF_RELAY) ? h->relay_port : 0;
+	v.beamer_wifi = h->wifi;
+	v.beamer_storage = h->storage;
+	publishView(&v, h->fw_build);
+}
+
+/* The mailbox of `mount`, derived once per mount (the MBR is read again after
+ * a failed read): the first MBR partition entry of type 0x0B or 0x0C (FAT32),
+ * end = start + size, the way the beamer firmware places it. USB_MB_OK with
+ * mb_lba 0: this drive cannot be a beamer. */
+static s32 beamerMailbox(u32 mount, u32 size)
 {
 	s32 res;
-	if (request_sock < 0 || relay_ip != 0 || TimerDiffMs(request_ts) < RELAY_BEACON_REQUEST_MS)
-		return;
-	request_ts = read32(HW_TIMER);
-	res = sendto(top_fd, request_sock, &request_msg, sizeof(request_msg), 0);
-	request_count++;
-	if (request_count <= 3 || (request_count % 30) == 0)
-		dbgprintf("RelayEXI: beacon request #%u broadcast to udp %u (%d)\r\n", request_count, TELEMETRY_PORT, res);
-}
+	u32 i;
 
-/* Idle-thread duty: set the socket up once the network is, then every
- * RELAY_BEACON_POLL_MS read what arrived. A datagram counts only if it is
- * exactly one relay_beacon with our magic, version and a non-zero port; the
- * latest one wins, so a relay that moves (new DHCP lease) is followed. */
-static void serviceBeacon(void)
-{
-	STACK_ALIGN(struct sockaddr_in, from, 1, 32);
-	const struct relay_beacon *b = (const struct relay_beacon *)beacon_rx;
-	u32 n;
-
-	if (!NetworkStarted)
-		return;
-	if (TimerDiffMs(beacon_ts) < (beacon_sock < 0 ? RELAY_BEACON_SETUP_MS : RELAY_BEACON_POLL_MS))
-		return;
-	beacon_ts = read32(HW_TIMER);
-	if (beacon_sock < 0)
+	if (mount == mb_mount)
+		return USB_MB_OK;
+	mb_lba = 0;
+	if (size != BEAMER_SECTOR_SIZE)
 	{
-		beaconSetup();
-		return;
+		dbgprintf("RelayEXI: usb drive has %u-byte sectors, not a beamer\r\n", size);
+		mb_mount = mount;
+		return USB_MB_OK;
 	}
-	requestBeacon();
-
-	for (n = 0; n < RELAY_BEACON_DRAIN_MAX; n++)
+	res = USBStorage_ReadMounted(mount, 0, 1, mb_buf, RELAY_IDLE_WAIT_MS);
+	if (res != USB_MB_OK)
+		return res;
+	mb_mount = mount;
+	if (mb_buf[510] == 0x55 && mb_buf[511] == 0xAA)
 	{
-		s32 res;
-		memset(from, 0, sizeof(*from));
-		from->sin_len = 8;
-		from->sin_family = AF_INET;
-		res = recvfromAddr(beacon_sock, beacon_rx, sizeof(beacon_rx), from);
-		if (res < 0)
-			break;	/* -EAGAIN: nothing more queued */
-		if (res != (s32)sizeof(struct relay_beacon) ||
-		    b->magic[0] != RELAY_MAGIC_0 || b->magic[1] != RELAY_MAGIC_1 ||
-		    b->version != RELAY_PROTO_VERSION || b->tcp_port == 0 ||
-		    from->sin_addr.s_addr == 0)
-			continue;
-		if (from->sin_addr.s_addr != relay_ip || b->tcp_port != relay_port)
+		for (i = 0; i < 4; i++)
 		{
-			u32 ip = from->sin_addr.s_addr;
-			dbgprintf("RelayEXI: relay is %u.%u.%u.%u:%u (event %u)\r\n",
-				ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
-				b->tcp_port, b->event_id);
-			relay_port = b->tcp_port;
-			relay_ip = ip;
+			const u8 *e = mb_buf + 0x1BE + 16 * i;
+			if (e[4] == 0x0B || e[4] == 0x0C)
+			{
+				mb_lba = le32(e + 8) + le32(e + 12);
+				break;
+			}
 		}
 	}
+	if (mb_lba)
+		dbgprintf("RelayEXI: usb drive: beamer mailbox would be at sector %u\r\n", mb_lba);
+	else
+		dbgprintf("RelayEXI: usb drive has no FAT32 partition, not a beamer\r\n");
+	return USB_MB_OK;
 }
 
-/* The beamer's telemetry sectors: beamer_tele_hdr under a new seq, then the
- * datagram in tele_buf, all BEAMER_MB_TELE_SECTORS in one USB write. */
-static bool beamerTele(u32 total)
+/* Idle-thread duty, every RELAY_BEAMER_HELLO_MS: read the hello sector and
+ * publish what it says (protocol.yaml beamer_hello, no_beamer_reason).
+ * USB_MB_BUSY or USB_MB_GONE leaves everything as it was until the next read.
+ * Finding the beamer (the first valid hello, and again on a new USB mount)
+ * also reads the response sector: the beamer outlives a Wii reboot and keeps
+ * its last response, so the next request seq starts one past that one
+ * (protocol.yaml beamer_req_hdr), or at 1 when the sector holds none. */
+static void serviceBeamer(void)
+{
+	const struct beamer_hello *h = (const struct beamer_hello *)mb_buf;
+	const struct beamer_resp_hdr *r = (const struct beamer_resp_hdr *)(mb_buf + BEAMER_SECTOR_SIZE);
+	u32 mount, size;
+	s32 res;
+
+	if (!beamer_usb || TimerDiffMs(mb_ts) < RELAY_BEAMER_HELLO_MS)
+		return;
+	mb_ts = read32(HW_TIMER);
+
+	if (USBStorage_Mount(RELAY_IDLE_WAIT_MS, &mount, &size) != USB_MB_OK)
+		return;
+	if (mount != seen_mount)
+	{
+		/* The drive went away or another one came: a beamer that is
+		 * rebooting gets its starting time again. */
+		if (seen_mount != 0)
+		{
+			starting_ts = read32(HW_TIMER);
+			starting = true;
+		}
+		seen_mount = mount;
+	}
+	if (mount == 0)
+	{
+		beamerDown(NB_NO_DRIVE);
+		return;
+	}
+
+	res = beamerMailbox(mount, size);
+	if (res == USB_MB_OK && mb_lba != 0)
+		res = USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_HELLO, 1, mb_buf, RELAY_IDLE_WAIT_MS);
+	if (res == USB_MB_BUSY || res == USB_MB_GONE)
+		return;
+	if (res != USB_MB_OK)
+	{
+		beamerDown(NB_UNKNOWN);
+		return;
+	}
+	if (mb_lba == 0 || memcmp(h->magic, "LAZYTOMB", sizeof(h->magic)) != 0)
+	{
+		beamerDown(NB_NOT_LAZYTO);
+		return;
+	}
+	/* fw_build is at offset 20 in mailbox v1 and v2 alike. */
+	if (h->version != BEAMER_MB_VERSION || h->fw_build < BEAMER_FW_MIN)
+	{
+		if (shown.no_beamer_reason != NB_OLD_FIRMWARE && shown.no_beamer_reason != NB_NEW_FIRMWARE)
+			dbgprintf("RelayEXI: beamer mailbox v%u fw %u; this loader needs v%u fw %u or later\r\n",
+				h->version, h->fw_build, BEAMER_MB_VERSION, BEAMER_FW_MIN);
+		beamerDown(h->version > BEAMER_MB_VERSION ? NB_NEW_FIRMWARE : NB_OLD_FIRMWARE);
+		return;
+	}
+
+	if (!beamer_up || mount != mb_seq_mount)
+	{
+		res = USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf + BEAMER_SECTOR_SIZE, RELAY_IDLE_WAIT_MS);
+		if (res == USB_MB_BUSY || res == USB_MB_GONE)
+			return;
+		if (res != USB_MB_OK)
+		{
+			beamerDown(NB_UNKNOWN);
+			return;
+		}
+		mb_seq = (r->magic[0] == RELAY_MAGIC_0 && r->magic[1] == 'R') ? r->seq : 0;
+		mb_seq_mount = mount;
+		dbgprintf("RelayEXI: beamer found, next request seq %u\r\n", mb_seq + 1);
+	}
+	beamerUp(h);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Relay thread: telemetry                                                   */
+
+/* The beamer's telemetry sector(s): beamer_tele_hdr under a new seq, then the
+ * datagram in tele_buf, in one USB write. */
+static s32 beamerTele(u32 total)
 {
 	struct beamer_tele_hdr *t = (struct beamer_tele_hdr *)mb_buf;
+	u32 n = (sizeof(*t) + total + BEAMER_SECTOR_SIZE - 1) / BEAMER_SECTOR_SIZE;
 
-	memset(mb_buf, 0, BEAMER_MB_TELE_SECTORS * BEAMER_SECTOR_SIZE);
+	memset(mb_buf, 0, n * BEAMER_SECTOR_SIZE);
 	t->magic[0] = RELAY_MAGIC_0;
 	t->magic[1] = 'E';
 	t->seq = ++mb_tele_seq;
 	t->len = (u16)total;
 	memcpy(mb_buf + sizeof(*t), tele_buf, total);
-	return USBStorage_WriteMounted(mb_mount, mb_lba + BEAMER_MB_TELE, BEAMER_MB_TELE_SECTORS, mb_buf);
+	return USBStorage_WriteMounted(mb_mount, mb_lba + BEAMER_MB_TELE, n, mb_buf, RELAY_IDLE_WAIT_MS);
 }
 
-/* One telemetry datagram: relay_auth + telemetry_hdr + `len` payload bytes,
- * the payload already at tele_buf + headers. A send error other than "would
- * block" closes the socket; the next tick reconnects. The beamer transport
- * writes it to the mailbox instead (beamerTele). */
+/* One telemetry datagram: telemetry_hdr + `len` payload bytes, the payload
+ * already at tele_buf + the header, stamped with the beamer's station. */
 static bool teleSend(u8 kind, u32 len)
 {
-	struct telemetry_hdr *h = (struct telemetry_hdr *)(tele_buf + sizeof(struct relay_auth));
-	u32 total = sizeof(struct relay_auth) + sizeof(struct telemetry_hdr) + len;
-	s32 res;
+	struct telemetry_hdr *h = (struct telemetry_hdr *)tele_buf;
 
-	putAuth(tele_buf);
 	h->magic[0] = RELAY_MAGIC_0;
 	h->magic[1] = TELEMETRY_MAGIC_1;
 	h->version = RELAY_PROTO_VERSION;
 	h->kind = kind;
-	h->station = cfg.station;
+	h->station = hello_station;
 	h->len = (u16)len;
 	h->seq = tele_seq;
 	h->uptime_ms = tele_uptime;
-	if (cfg.beamer)
-	{
-		if (!beamerTele(total))
-			return false;
-		tele_seq++;
-		return true;
-	}
-	res = sendto(top_fd, tele_sock, tele_buf, total, 0);
-	if (res == (s32)total)
-	{
-		tele_seq++;
-		return true;
-	}
-	if (res != -RELAY_SO_EAGAIN)
-	{
-		close(top_fd, tele_sock);
-		tele_sock = -1;
-	}
-	return false;
+	if (beamerTele(sizeof(*h) + len) != USB_MB_OK)
+		return false;
+	tele_seq++;
+	return true;
 }
 
-/* Log a new crash report as soon as the module writes one (network or not),
+/* Log a new crash report as soon as the module writes one (beamer or not),
  * and remember it for TM_CRASH. */
 static void watchCrash(void)
 {
@@ -744,54 +573,20 @@ static void watchCrash(void)
 		dbgprintf("TMOD:CRASH stack[%u] %08x\r\n", i, crash_copy.stack[i]);
 }
 
-/* The telemetry socket (network transport): connected to the relay's
- * TELEMETRY_PORT, set up again when the relay moves. False: not now. */
-static bool teleConnect(void)
-{
-	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
-	s32 sock, flags;
+/* The beamer forwards a datagram only with a number, a secret and a relay
+ * (protocol.yaml beamer_tele_hdr); until it has all three the log stays
+ * queued here instead of being written and dropped. */
+#define TELE_NEEDS	(BF_STATION_SET | BF_SECRET | BF_RELAY)
 
-	if (!NetworkStarted)
-		return false;
-	if (tele_sock >= 0 && tele_ip != relay_ip)
-	{
-		close(top_fd, tele_sock);
-		tele_sock = -1;
-	}
-	if (tele_sock >= 0)
-		return true;
-	sock = socket(top_fd, AF_INET, SOCK_DGRAM, IPPROTO_IP);
-	if (sock < 0)
-		return false;
-	flags = relay_fcntl(sock, RELAY_F_GETFL, 0);
-	if (flags < 0)
-		flags = 0;
-	relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
-	memset(addr, 0, sizeof(*addr));
-	addr->sin_family = AF_INET;
-	addr->sin_port = TELEMETRY_PORT;
-	addr->sin_addr.s_addr = relay_ip;
-	if (connect(top_fd, sock, (struct sockaddr *)addr) < 0)
-	{
-		close(top_fd, sock);
-		return false;
-	}
-	tele_sock = sock;
-	tele_ip = relay_ip;
-	tele_status_due = true;
-	dbgprintf("RelayEXI: telemetry to %u.%u.%u.%u:%u\r\n",
-		relay_ip >> 24, (relay_ip >> 16) & 0xFF, (relay_ip >> 8) & 0xFF, relay_ip & 0xFF, TELEMETRY_PORT);
-	return true;
-}
-
-/* Idle-thread duty, after serviceBeacon / serviceBeamer: once the relay is
- * known, a TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the
- * module state changes or the relay moves), and the unsent kernel log in
- * TM_LOG chunks. Needs lazyto_station.txt's secret like every request. */
+/* Idle-thread duty, after serviceBeamer: once the beamer can forward, a
+ * TM_STATUS at least every TELEMETRY_STATUS_MS (and at once when the module
+ * state changes or the relay moves), a TM_CRASH, and the unsent kernel log in
+ * TM_LOG chunks. A USB write costs a few ms: one datagram per tick, and none
+ * while a request waits for this thread. */
 static void serviceTelemetry(void)
 {
-	u8 *payload = tele_buf + sizeof(struct relay_auth) + sizeof(struct telemetry_hdr);
-	u32 dt, n, i, state, len, load, patches, arena;
+	u8 *payload = tele_buf + sizeof(struct telemetry_hdr);
+	u32 dt, n, state, len, load, patches, arena;
 
 	dt = TimerDiffMs(tele_ts);
 	if (dt < RELAY_TELEMETRY_TICK_MS)
@@ -805,22 +600,13 @@ static void serviceTelemetry(void)
 	TelemetryGetModule(&state, &len, &load, &patches, &arena);
 	watchCrash();
 
-	if (relay_ip == 0 || !cfg.ok || !cfg.has_secret)
+	if (!beamer_up || (hello_flags & TELE_NEEDS) != TELE_NEEDS || relay_state == RELAY_BUSY)
 		return;
-	if (cfg.beamer)
+	if (tele_ip != relay_ip)
 	{
-		/* A USB write costs a few ms: one per tick, and none while a request
-		 * waits for this thread. */
-		if (!beamer_up || relay_state == RELAY_BUSY)
-			return;
-		if (tele_ip != relay_ip)
-		{
-			tele_ip = relay_ip;
-			tele_status_due = true;
-		}
+		tele_ip = relay_ip;
+		tele_status_due = true;
 	}
-	else if (!teleConnect())
-		return;
 
 	if (tele_status_due || state != tele_sent_state || tele_status_ms >= TELEMETRY_STATUS_MS)
 	{
@@ -838,8 +624,7 @@ static void serviceTelemetry(void)
 			tele_sent_state = state;
 			tele_status_ms = 0;
 		}
-		if (cfg.beamer || tele_sock < 0)
-			return;
+		return;
 	}
 
 	if (crash_send_seq != crash_seen_seq)
@@ -847,18 +632,16 @@ static void serviceTelemetry(void)
 		memcpy(payload, &crash_copy, sizeof(crash_copy));
 		if (teleSend(TM_CRASH, sizeof(crash_copy)))
 			crash_send_seq = crash_seen_seq;
-		if (cfg.beamer || tele_sock < 0)
-			return;
+		return;
 	}
 
-	for (i = 0; i < (cfg.beamer ? 1 : RELAY_TELEMETRY_CHUNKS); i++)
-	{
-		n = TelemetryPeek((char *)payload, TELEMETRY_TEXT_MAX);
-		if (n == 0 || !teleSend(TM_LOG, n))
-			break;
+	n = TelemetryPeek((char *)payload, TELEMETRY_TEXT_MAX);
+	if (n != 0 && teleSend(TM_LOG, n))
 		TelemetryConsume(n);
-	}
 }
+
+/* ------------------------------------------------------------------------- */
+/* Relay thread: one request                                                 */
 
 static u32 remainingMs(u32 start)
 {
@@ -866,405 +649,176 @@ static u32 remainingMs(u32 start)
 	return elapsed >= RELAY_BUDGET_MS ? 0 : RELAY_BUDGET_MS - elapsed;
 }
 
-/* One TCP round trip: socket -> non-blocking connect -> send -> recv until the
- * relay closes -> close, all inside RELAY_BUDGET_MS. On success resp_buf holds
- * the relay's bytes and NULL is returned; otherwise a short reason. The
- * poll()-with-deadline shape is SlippiNetwork.c waitForMessage/
- * getClientMessage (lines 96-175). */
-static const char *doRoundTrip(u32 start)
+/* A mailbox call that did not do its work, as the request's last_fail. */
+static u8 usbFail(s32 res, u8 failed)
 {
-	STACK_ALIGN(struct pollsd, pfd, 1, 32);
-	STACK_ALIGN(struct sockaddr_in, addr, 1, 32);
-	const char *fail = NULL;
-	s32 sock, res, flags;
-	/* One snapshot per round trip: a beacon that moves the relay mid-request
-	 * takes effect on the next request. */
-	const u32 ip = relay_ip;
-	const u16 port = (u16)relay_port;
-
-	sock = socket(top_fd, AF_INET, SOCK_STREAM, IPPROTO_IP);
-	if (sock < 0)
-	{
-		dbgprintf("RelayEXI: socket() returned %d\r\n", sock);
-		return "socket";
-	}
-
-	/* R9: connect() has no timeout in this kernel, so make the socket
-	 * non-blocking and wait for writability with the same deadline. */
-	flags = relay_fcntl(sock, RELAY_F_GETFL, 0);
-	if (flags < 0)
-		flags = 0;
-	relay_fcntl(sock, RELAY_F_SETFL, (u32)flags | RELAY_IOS_O_NONBLOCK);
-
-	memset(addr, 0, sizeof(*addr));
-	addr->sin_family = AF_INET;
-	addr->sin_port = port;
-	addr->sin_addr.s_addr = ip;
-	res = connect(top_fd, sock, (struct sockaddr *)addr);
-	if (res < 0 && res != -RELAY_SO_EINPROGRESS && res != -RELAY_SO_EAGAIN && res != -RELAY_SO_EALREADY)
-	{
-		/* Seen on hardware 2026-09-30: two REPORT_SCOREs failed here within
-		 * 25 ms while the relay was up; the IOS code tells Wi-Fi drop from
-		 * socket exhaustion from a refused port. */
-		dbgprintf("RelayEXI: connect() to %u.%u.%u.%u:%u returned %d (socket %d)\r\n",
-			ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port, res, sock);
-		fail = "connect";
-	}
-	else if (res < 0)
-	{
-		/* IOS's poll does not wake when a connecting socket becomes writable:
-		 * on hardware (2026-10-01) poll(POLLOUT, 3200 ms) slept the whole
-		 * 3200 ms and only then reported revents 0008, the connect having
-		 * completed long before, so the reply read ran out of budget. Poll in
-		 * short slices instead; completion is seen within one slice. */
-		u32 rem;
-		fail = "connect timeout";
-		while ((rem = remainingMs(start)) > 0)
-		{
-			pfd[0].socket = sock;
-			pfd[0].events = POLLOUT;
-			pfd[0].revents = 0;
-			res = poll(top_fd, pfd, 1, rem < RELAY_CONNECT_SLICE_MS ? rem : RELAY_CONNECT_SLICE_MS);
-			if (res < 0 || (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)))
-				break;
-			if (res > 0 && (pfd[0].revents & POLLOUT))
-			{
-				fail = NULL;
-				break;
-			}
-		}
-		if (fail)
-			dbgprintf("RelayEXI: connect gave up after %u ms (poll %d revents %04x)\r\n",
-				TimerDiffMs(start), res, (u32)pfd[0].revents);
-	}
-
-	if (!fail)
-	{
-		/* relay_auth then the game's request, in one send (decisions.md R16). */
-		u32 total = putRequest(send_buf);
-		res = sendto(top_fd, sock, send_buf, total, 0);
-		if (res != (s32)total)
-			fail = "send";
-	}
-
-	/* The relay serves one request per connection and closes after its reply
-	 * (architecture.md), so EOF ends the response. */
-	while (!fail)
-	{
-		u32 rem = remainingMs(start);
-		u32 want;
-		if (rem == 0)
-		{
-			fail = "timeout";
-			break;
-		}
-		pfd[0].socket = sock;
-		pfd[0].events = POLLIN;
-		pfd[0].revents = 0;
-		res = poll(top_fd, pfd, 1, rem);
-		if (res < 0)
-		{
-			fail = "poll";
-			break;
-		}
-		if (res == 0 || !(pfd[0].revents & (POLLIN | POLLHUP | POLLERR)))
-		{
-			/* A poll that returns at once with bits we do not read would spin
-			 * until the deadline; a short sleep stops the spin. */
-			if (res > 0)
-				mdelay(10);
-			continue;
-		}
-		if (resp_len >= RELAY_RESP_MAX)
-		{
-			fail = "response too large";
-			break;
-		}
-		want = RELAY_RESP_MAX - resp_len;
-		if (want > RELAY_RX_CHUNK)
-			want = RELAY_RX_CHUNK;
-		res = recvfrom(top_fd, sock, rx_chunk, want, 0);
-		if (res == 0)
-			break;	/* clean close = end of the one response */
-		if (res == -RELAY_SO_EAGAIN)
-			continue;
-		if (res < 0)
-		{
-			fail = "recv";
-			break;
-		}
-		memcpy(resp_buf + resp_len, rx_chunk, res);
-		resp_len += res;
-	}
-
-	close(top_fd, sock);
-	return fail;
+	if (res == USB_MB_BUSY)
+		return LF_USB_BUSY;
+	if (res == USB_MB_GONE)
+		return LF_BEAMER_LOST;
+	return failed;
 }
 
-/* ------------------------------------------------------------------------- */
-/* Beamer transport (protocol.yaml beamer_hello / beamer_req_hdr / ...)      */
-
-/* Little-endian u32, as the MBR stores it (the kernel is big-endian). */
-static u32 le32(const u8 *p)
+static const char *failName(u8 fail)
 {
-	return p[0] | (p[1] << 8) | (p[2] << 16) | ((u32)p[3] << 24);
+	switch (fail)
+	{
+		case BR_NO_RELAY:	return "beamer: no relay";
+		case BR_NO_WIFI:	return "beamer: no wi-fi";
+		case BR_CONNECT:	return "beamer: connect";
+		case BR_TIMEOUT:	return "beamer: relay timeout";
+		case BR_TOO_LARGE:	return "beamer: reply too large";
+		case BR_BAD_REQ:	return "beamer: bad request";
+		case BR_NO_STATION:	return "no station number";
+		case BR_NO_SECRET:	return "beamer: no secret";
+		case LF_NO_BEAMER:	return "no beamer";
+		case LF_USB_WRITE:	return "usb write";
+		case LF_USB_READ:	return "usb read";
+		case LF_USB_BUSY:	return "usb busy";
+		case LF_NO_ANSWER:	return "no answer";
+		case LF_BAD_REPLY:	return "bad reply";
+		case LF_BAD_REQUEST:	return "bad request";
+		case LF_BEAMER_LOST:	return "beamer lost";
+		default:		return "?";
+	}
 }
 
-/* The mailbox of the drive mounted now, derived once per mount (and again
- * after a USB error): the first MBR partition entry of type 0x0B or 0x0C
- * (FAT32), end = start + size, the way the beamer firmware places it. Returns
- * the mount id, 0 when there is no drive or it cannot be a beamer. */
-static u32 beamerMailbox(void)
-{
-	u32 mount, size, i;
-
-	mount = USBStorage_Mount(&size);
-	if (mount == 0)
-		return 0;
-	if (mount == mb_mount)
-		return mb_lba ? mount : 0;
-	mb_lba = 0;
-	if (size != BEAMER_SECTOR_SIZE)
-	{
-		dbgprintf("RelayEXI: usb drive has %u-byte sectors, not a beamer\r\n", size);
-		mb_mount = mount;
-		return 0;
-	}
-	if (!USBStorage_ReadMounted(mount, 0, 1, mb_buf))
-		return 0;	/* read the MBR again next time */
-	mb_mount = mount;
-	if (mb_buf[510] == 0x55 && mb_buf[511] == 0xAA)
-	{
-		for (i = 0; i < 4; i++)
-		{
-			const u8 *e = mb_buf + 0x1BE + 16 * i;
-			if (e[4] == 0x0B || e[4] == 0x0C)
-			{
-				mb_lba = le32(e + 8) + le32(e + 12);
-				break;
-			}
-		}
-	}
-	if (mb_lba)
-		dbgprintf("RelayEXI: usb drive: beamer mailbox would be at sector %u\r\n", mb_lba);
-	else
-		dbgprintf("RelayEXI: usb drive has no FAT32 partition, not a beamer\r\n");
-	return mb_lba ? mount : 0;
-}
-
-/* Idle-thread duty (beamer transport), every RELAY_BEAMER_HELLO_MS: read the
- * hello sector. A valid one (magic, BEAMER_MB_VERSION) makes the mailbox
- * writable and gives the relay address for exi_poll_hdr (0 until the beamer
- * has heard the beacon, BF_RELAY); anything else - no drive, no FAT32
- * partition, a USB error, an ordinary stick - is PF_NO_BEAMER.
- * Finding the beamer (the first valid hello, and again on a new USB mount)
- * also reads the response sector: the beamer outlives a Wii reboot and keeps
- * its last response, so the next request seq starts one past that one
- * (protocol.yaml beamer_req_hdr), or at 1 when the sector holds none. */
-static void serviceBeamer(void)
-{
-	const struct beamer_hello *h = (const struct beamer_hello *)mb_buf;
-	const struct beamer_resp_hdr *r = (const struct beamer_resp_hdr *)(mb_buf + BEAMER_SECTOR_SIZE);
-	u32 mount, ip, port;
-	bool found;
-
-	if (!beamer_usb || TimerDiffMs(mb_ts) < RELAY_BEAMER_HELLO_MS)
-		return;
-	mb_ts = read32(HW_TIMER);
-	mount = beamerMailbox();
-	found = !beamer_up || mount != mb_seq_mount;
-	if (mount == 0 || !USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_HELLO, 1, mb_buf) ||
-	    memcmp(h->magic, "LAZYTOMB", sizeof(h->magic)) != 0 || h->version != BEAMER_MB_VERSION ||
-	    (found && !USBStorage_ReadMounted(mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf + BEAMER_SECTOR_SIZE)))
-	{
-		if (beamer_up)
-			dbgprintf("RelayEXI: beamer lost\r\n");
-		else if (mount != 0 && mb_hello_logged != mount)
-			dbgprintf("RelayEXI: no beamer hello at sector %u\r\n", mb_lba + BEAMER_MB_HELLO);
-		if (mount != 0)
-			mb_hello_logged = mount;
-		beamer_up = 0;
-		relay_ip = 0;
-		relay_port = 0;
-		return;
-	}
-	if (!beamer_up || h->fw_build != mb_fw)
-		dbgprintf("RelayEXI: beamer fw %u (station %u) on usb, flags %u\r\n", h->fw_build, h->station, h->flags);
-	mb_fw = h->fw_build;
-	ip = (h->flags & BF_RELAY) ? h->relay_ip : 0;
-	port = (h->flags & BF_RELAY) ? h->relay_port : 0;
-	if (ip != relay_ip || port != relay_port)
-		dbgprintf("RelayEXI: relay is %u.%u.%u.%u:%u (from the beamer)\r\n",
-			ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port);
-	relay_port = port;
-	relay_ip = ip;
-	if (found)
-	{
-		mb_seq = (r->magic[0] == RELAY_MAGIC_0 && r->magic[1] == 'R') ? r->seq : 0;
-		mb_seq_mount = mount;
-		dbgprintf("RelayEXI: beamer found, next request seq %u\r\n", mb_seq + 1);
-	}
-	beamer_up = 1;
-}
-
-/* One mailbox round trip, doRoundTrip's contract over USB: relay_auth + the
- * request into the request sector under a new seq (the beamer sends each seq
- * to the relay once), then the first response sector every
- * RELAY_BEAMER_POLL_MS until it carries that seq, inside RELAY_BUDGET_MS.
- * BR_NO_RELAY / BR_NO_WIFI become text for the game like the kernel's own;
- * every other result and any USB error is a transport failure. */
-static const char *beamerRoundTrip(u32 start)
+/* One mailbox round trip: the request into the request sector under a new seq
+ * (the beamer sends each seq to the relay once, behind its relay_auth), then
+ * the first response sector every RELAY_BEAMER_POLL_MS until it carries that
+ * seq, all inside RELAY_BUDGET_MS, waits for the USB lock included. Returns
+ * LF_NONE with the relay's reply in resp_buf, or why not (relay_fail, or the
+ * beamer's own beamer_result passed through). */
+static u8 beamerRoundTrip(u32 start)
 {
 	struct beamer_req_hdr *q = (struct beamer_req_hdr *)mb_buf;
 	const struct beamer_resp_hdr *r = (const struct beamer_resp_hdr *)mb_buf;
+	const struct relay_hdr *req = (const struct relay_hdr *)req_buf;
+	const struct relay_hdr *reply = (const struct relay_hdr *)(mb_buf + sizeof(struct beamer_resp_hdr));
 	u32 seq, len, n;
+	s32 res;
 
 	memset(mb_buf, 0, BEAMER_SECTOR_SIZE);
 	q->magic[0] = RELAY_MAGIC_0;
 	q->magic[1] = 'Q';
 	q->seq = seq = ++mb_seq;
-	q->len = (u16)putRequest(mb_buf + sizeof(*q));
-	if (!USBStorage_WriteMounted(mb_mount, mb_lba + BEAMER_MB_REQ, 1, mb_buf))
-		return "usb write";
+	q->len = (u16)req_len;
+	memcpy(mb_buf + sizeof(*q), req_buf, req_len);
+	res = USBStorage_WriteMounted(mb_mount, mb_lba + BEAMER_MB_REQ, 1, mb_buf, remainingMs(start));
+	if (res != USB_MB_OK)
+		return usbFail(res, LF_USB_WRITE);
 
 	while (1)
 	{
 		if (remainingMs(start) == 0)
-			return "timeout";
+			return LF_NO_ANSWER;
 		mdelay(RELAY_BEAMER_POLL_MS);
-		if (!USBStorage_ReadMounted(mb_mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf))
-			return "usb read";
+		res = USBStorage_ReadMounted(mb_mount, mb_lba + BEAMER_MB_RESP, 1, mb_buf, remainingMs(start));
+		if (res != USB_MB_OK)
+			return usbFail(res, LF_USB_READ);
 		if (r->magic[0] == RELAY_MAGIC_0 && r->magic[1] == 'R' && r->seq == seq)
 			break;
 	}
 
-	switch (r->result)
-	{
-		case BR_OK:
-			break;
-		case BR_NO_RELAY:
-			synthResponse("no relay found yet");
-			return NULL;
-		case BR_NO_WIFI:
-			synthResponse("beamer not on wi-fi");
-			return NULL;
-		case BR_CONNECT:
-			return "beamer: connect";
-		case BR_TIMEOUT:
-			return "beamer: relay timeout";
-		case BR_TOO_LARGE:
-			return "beamer: response too large";
-		case BR_BAD_REQ:
-			return "beamer: bad request";
-		default:
-			dbgprintf("RelayEXI: beamer result %u\r\n", r->result);
-			return "beamer: unknown result";
-	}
+	if (r->result != BR_OK)
+		return r->result < LF_NO_BEAMER ? r->result : LF_BAD_REPLY;
 
 	/* The reply may run on into the other response sectors. */
 	len = r->len;
-	if (len > RELAY_RESP_MAX)
-		return "beamer: response too large";
+	if (len > RELAY_REPLY_MAX || len < sizeof(struct relay_hdr) + sizeof(struct relay_resp))
+		return LF_BAD_REPLY;
 	n = (sizeof(struct beamer_resp_hdr) + len + BEAMER_SECTOR_SIZE - 1) / BEAMER_SECTOR_SIZE;
-	if (n > 1 && !USBStorage_ReadMounted(mb_mount, mb_lba + BEAMER_MB_RESP + 1, n - 1, mb_buf + BEAMER_SECTOR_SIZE))
-		return "usb read";
+	if (n > 1)
+	{
+		res = USBStorage_ReadMounted(mb_mount, mb_lba + BEAMER_MB_RESP + 1, n - 1,
+			mb_buf + BEAMER_SECTOR_SIZE, remainingMs(start));
+		if (res != USB_MB_OK)
+			return usbFail(res, LF_USB_READ);
+	}
+	if (reply->magic[0] != RELAY_MAGIC_0 || reply->magic[1] != RELAY_MAGIC_1 || reply->cmd != req->cmd)
+		return LF_BAD_REPLY;
 	memcpy(resp_buf, mb_buf + sizeof(struct beamer_resp_hdr), len);
 	resp_len = len;
-	return NULL;
+	return LF_NONE;
+}
+
+/* The request the main loop handed over (relay_state == RELAY_BUSY). */
+static void serveRequest(void)
+{
+	struct relay_hdr *h = (struct relay_hdr *)req_buf;
+	u32 start = read32(HW_TIMER);
+	u8 fail;
+
+	resp_len = 0;
+	if (!beamer_up)
+		fail = LF_NO_BEAMER;
+	else if (!(hello_flags & BF_STATION_SET))
+		fail = BR_NO_STATION;	/* nothing is written: the beamer would refuse it too */
+	else
+	{
+		/* Station stamping: the game sends 0. */
+		h->station = hello_station;
+		fail = beamerRoundTrip(start);
+	}
+
+	if (fail != LF_NONE)
+	{
+		dbgprintf("RelayEXI: cmd %u len %u -> ERROR %u (%s) after %u ms\r\n",
+			h->cmd, h->len, fail, failName(fail), TimerDiffMs(start));
+		resp_len = 0;
+		last_fail = fail;
+		relay_state = RELAY_ERROR;
+	}
+	else
+	{
+		const struct relay_resp *r = (const struct relay_resp *)(resp_buf + sizeof(struct relay_hdr));
+		dbgprintf("RelayEXI: cmd %u len %u -> DONE status %u resp %u bytes in %u ms\r\n",
+			h->cmd, h->len, r->status, resp_len, TimerDiffMs(start));
+		last_fail = LF_NONE;
+		relay_state = RELAY_DONE;	/* publishes resp_buf/resp_len to the poll path */
+	}
 }
 
 static u32 RelayEXIThread(void *arg)
 {
 	while (1)
 	{
-		struct relay_hdr *h;
-		const struct relay_resp *r;
-		const char *fail;
-		u32 start, result;
-
-		if (relay_state != RELAY_BUSY)
+		if (relay_state == RELAY_BUSY)
 		{
-			if (cfg.beamer)
-				serviceBeamer();
-			else
-				serviceBeacon();
-			serviceTelemetry();
-			mdelay(RELAY_THREAD_CYCLE_MS);
+			serveRequest();
 			continue;
 		}
-
-		start = read32(HW_TIMER);
-		h = (struct relay_hdr *)req_buf;
-		resp_len = 0;
-
-		/* Station stamping (design 5.3): the game sends 0. start_set_req.stream
-		 * goes out as the game sent it; the relay ignores it. */
-		h->station = cfg.station;
-
-		if (!cfg.ok)
-		{
-			synthResponse("no station file");
-			fail = NULL;
-		}
-		else if (cfg.beamer && !beamer_up)
-		{
-			synthResponse("no beamer on usb");
-			fail = NULL;
-		}
-		else if (!cfg.beamer && !NetworkStarted)
-		{
-			synthResponse("no network");
-			fail = NULL;
-		}
-		else if (!cfg.has_secret)
-		{
-			synthResponse("no secret in station file");
-			fail = NULL;
-		}
-		else if (cfg.beamer)
-			fail = beamerRoundTrip(start);	/* the beamer answers BR_NO_RELAY itself */
-		else if (relay_ip == 0)
-		{
-			synthResponse("no relay found yet");
-			fail = NULL;
-		}
-		else
-			fail = doRoundTrip(start);
-
-		if (!fail && resp_len < sizeof(struct relay_hdr) + sizeof(struct relay_resp))
-			fail = "short response";
-		if (fail)
-		{
-			dbgprintf("RelayEXI: cmd %u len %u -> ERROR (%s) after %u ms\r\n",
-				h->cmd, h->len, fail, TimerDiffMs(start));
-			resp_len = 0;
-			result = RELAY_ERROR;
-		}
-		else
-		{
-			r = (const struct relay_resp *)(resp_buf + sizeof(struct relay_hdr));
-			dbgprintf("RelayEXI: cmd %u len %u -> DONE status %u resp %u bytes in %u ms\r\n",
-				h->cmd, h->len, r->status, resp_len, TimerDiffMs(start));
-			result = RELAY_DONE;
-		}
-		relay_state = result;	/* publishes resp_buf/resp_len to the poll path */
+		serviceBeamer();
+		serviceTelemetry();
+		mdelay(RELAY_THREAD_CYCLE_MS);
 	}
 	return 0;
 }
 
 void RelayEXIInit(void)
 {
-	loadCfg();
-	/* The beamer is the Slippi replay drive: kernel/main.c:197-203 starts USB
+	struct exi_poll_hdr v;
+
+	/* The beamer is the Slippi replay drive: kernel/main.c:193-203 starts USB
 	 * in hotswap mode only with replays on and the game on SD. Booting from
 	 * USB, the main loop and the DI thread read the drive without the USB lock
 	 * (usbstorage.c), so the relay thread must not touch it then. */
 	beamer_usb = ConfigGetConfig(NIN_CFG_SLIPPI_REPLAYS) && !ConfigGetUseUSB();
-	if (cfg.beamer && !beamer_usb)
-		dbgprintf("RelayEXI: transport=beamer needs Slippi replays on and the game on SD; USB is not the replay drive, no beamer\r\n");
+	if (!beamer_usb)
+		dbgprintf("RelayEXI: Slippi replays are off or the game is on USB, so USB is not the replay drive: no beamer\r\n");
 	relay_state = RELAY_IDLE;
+	last_fail = LF_NONE;
 	tele_ts = read32(HW_TIMER);
 	mb_ts = tele_ts;
+	starting_ts = tele_ts;
+
+	/* Until the first hello read: replays off is final; otherwise the beamer
+	 * may still be starting. */
+	memset(&v, 0, sizeof(v));
+	v.flags = PF_NO_BEAMER;
+	v.no_beamer_reason = beamer_usb ? NB_STARTING : NB_REPLAYS_OFF;
+	publishView(&v, 0);
+
 	{
 		/* Hand the module its crash mailbox: zero, then the magic. */
 		volatile struct crash_mailbox *mb = (volatile struct crash_mailbox *)CRASH_MAILBOX_ARM;

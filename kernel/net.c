@@ -82,8 +82,9 @@ int NCDInit(void)
  * with no timeout, and upstream called NCDInit() from main(): a slow or
  * refused join hung the whole boot at "Slippi network init" and only a power
  * cycle helped. Melee boots regardless now. Everything that needs sockets
- * waits on NetworkStarted (the Slippi threads, RelayEXI per request), and the
- * kiosk shows PF_NET_JOINING until it flips. */
+ * waits on NetworkStarted: the Slippi threads (console mirroring). LazyTO's
+ * relay device uses no sockets since protocol v2: its link is the beamer
+ * (RelayEXI.c). */
 extern char __net_init_stack_addr, __net_init_stack_size;
 static u32 NetworkInit_Thread;
 
