@@ -227,6 +227,7 @@ static u32 SlippiHandlerThread(void *arg)
 	bool failedToMount = false;
 	bool currentFileOpen = false;
 	bool currentFileValid = false;
+	bool currentFileSynced = false;	// LazyTO: the early f_sync is done for the open file
 	const bool use_usb = ConfigGetUseUSB() != 1;
 	bool mounted = use_usb ? USBStorage_IsInserted_SlippiThread() : true;
 
@@ -392,6 +393,7 @@ static u32 SlippiHandlerThread(void *arg)
 					}
 
 					currentFileOpen = true;
+					currentFileSynced = false;
 					writtenByteCount = 0;
 					lastFrame = 0;
 
@@ -445,6 +447,23 @@ static u32 SlippiHandlerThread(void *arg)
 				memReadPos += wrote;
 				writtenByteCount += wrote;
 				lastFrame = reader.metadata.lastFrame;
+
+				// LazyTO: one f_sync after the first data block of each
+				// recording (Event Payloads and Game Start), some 0.2-0.3 s in
+				// (estimated). The directory entry then owns the cluster chain,
+				// so a recording cut off later (Wii off, exit to the loader,
+				// beamer unplugged) is a file with a size, not a 0-byte entry
+				// with leaked clusters, and the beamer can see the game as
+				// live. Upstream #66 dropped the per-write syncs for flash
+				// wear; this is one per file. A failed sync leaves the file
+				// usable, so it is only logged.
+				if (!currentFileSynced && !reader.lastReadResult.isGameEnd)
+				{
+					FRESULT syncResult = f_sync(&currentFile);
+					if (syncResult != FR_OK)
+						dbgprintf("Slippi: failed to sync new file, errno: %d\r\n", syncResult);
+					currentFileSynced = true;
+				}
 
 				if (reader.lastReadResult.isGameEnd)
 				{

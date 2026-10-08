@@ -13,6 +13,8 @@ Melee weekly pick, play and report their start.gg sets from the Wii itself.
 - **Record gate**: with the kiosk module loaded, Slippi records only the matches the kiosk starts
   as set games, and tells the kiosk each replay's name. A match that never sent Game End is
   finished, and the next one is still recorded.
+- **Early sync**: each recording is synced once after its first data block, so an interrupted
+  game is a file with a size that the beamer can collect and erase.
 - **Module loader**: copies `lazyto_kiosk.bin` from the SD card into RAM at boot and applies its
   hooks on top of stock Melee 1.02. The venue's own Slippi codesets still apply.
 - **Station telemetry**: the kernel log and module load result are sent to the relay status page.
