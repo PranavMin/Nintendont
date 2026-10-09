@@ -8,6 +8,7 @@
 
 #include "Config.h"
 #include "usbstorage.h"
+#include "RelayEXI.h"
 
 // use common physical sector size so as to write efficiently
 // and not excessively wear out the underlying flash storage
@@ -219,13 +220,14 @@ static u32 SlippiHandlerThread(void *arg)
 	static u64 memReadPos = 0;
 
 	u32 writtenByteCount = 0;
-	s32 lastFrame;
+	s32 lastFrame = 0;	// the open file's last frame so far, for completeFile
 	driveTimer = read32(HW_TIMER);
 	driveTimerSet = false;
 
 	bool failedToMount = false;
 	bool currentFileOpen = false;
 	bool currentFileValid = false;
+	bool currentFileSynced = false;	// LazyTO: the early f_sync is done for the open file
 	const bool use_usb = ConfigGetUseUSB() != 1;
 	bool mounted = use_usb ? USBStorage_IsInserted_SlippiThread() : true;
 
@@ -286,7 +288,19 @@ static u32 SlippiHandlerThread(void *arg)
 		{
 			// Read from memory and write to file
 			SlpMemError err = SlippiMemoryRead(&reader, readBuf, READ_BUF_SIZE, memReadPos);
-			if (err)
+			// LazyTO: a match that never sent Game End (a soft reset,
+			// training). readBuf holds the rest of it, up to the next match's
+			// RECEIVE_COMMANDS at reader.lastReadPos (SlippiMemory.c:124-130,
+			// 185), and goes through the same steps as any read below: when
+			// the read began at a match's own start (isNewGame, a match cut
+			// off within its first 4 KB), the dangling file is completed and
+			// that match's record choice decides first, so the bytes land in
+			// the file of the match they belong to, or are skipped. The
+			// writer then resumes at the next match, whose new-game step
+			// completes this file. Jumping to the write cursor, as other
+			// errors do, would lose the next match too.
+			bool cutShort = err == SLP_MEM_UNNEX_NG;
+			if (err && !cutShort)
 			{
 				// all possible errors render the current file incompletable, so let's jump ahead
 				currentFileValid = false;
@@ -306,9 +320,12 @@ static u32 SlippiHandlerThread(void *arg)
 				break;
 			}
 
-			if (reader.lastReadResult.bytesAvailable < READ_BUF_SIZE && !(currentFileValid && reader.lastReadResult.isGameEnd))
+			// (a cut-short match is over: the next one has started)
+			if (!cutShort && reader.lastReadResult.bytesAvailable < READ_BUF_SIZE && !(currentFileValid && reader.lastReadResult.isGameEnd))
 			{
-				if (replaysLED)
+				// LazyTO: the LED only while a file is being written, not for a
+				// match the kiosk did not ask for
+				if (replaysLED && currentFileValid)
 					flashLED();
 				break;
 			}
@@ -336,39 +353,64 @@ static u32 SlippiHandlerThread(void *arg)
 					currentFileOpen = false;
 				}
 
-				dbgprintf("Creating File...\r\n");
-				gameStartTime = GetCurrentTime();
-				char *fileName = generateFileName();
-				// Maybe can remove FA_READ since network thread doesn't share &currentFile
-				FRESULT fileOpenResult = f_open_secondary_drive(&currentFile, fileName, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
-				if (fileOpenResult != FR_OK)
+				// LazyTO record gate: the choice made at this match's Game Start
+				// (RelayEXI.c RelayEXIGateStart). The read starts at its
+				// RECEIVE_COMMANDS (SlippiMemory.c:132-138), the cursor the
+				// choice was kept under. Not recorded: no file at all, and the
+				// skip path below drains the match.
+				u32 gateSeq;
+				bool record = RelayEXIGateChoice((u32)memReadPos, &gateSeq);
+				if (gateSeq == 0)
+					dbgprintf("Slippi: no record choice for the match at 0x%08x, recording it\r\n", (u32)memReadPos);
+				if (!record)
+					dbgprintf("Slippi: game start %u not recorded\r\n", gateSeq);
+				else
 				{
-					dbgprintf("Slippi: failed to open file: %s, errno: %d\r\n", fileName, fileOpenResult);
-					break;
-				}
+					dbgprintf("Creating File...\r\n");
+					gameStartTime = GetCurrentTime();
+					char *fileName = generateFileName();
+					// Maybe can remove FA_READ since network thread doesn't share &currentFile
+					FRESULT fileOpenResult = f_open_secondary_drive(&currentFile, fileName, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
+					if (fileOpenResult != FR_OK)
+					{
+						dbgprintf("Slippi: failed to open file: %s, errno: %d\r\n", fileName, fileOpenResult);
+						break;
+					}
 
-				currentFileOpen = true;
-				writtenByteCount = 0;
-				
-				FRESULT writeHeaderResult = writeHeader(&currentFile);
-				if (writeHeaderResult != FR_OK)
-				{
-					dbgprintf("Slippi: failed to write header, errno: %d\r\n", writeHeaderResult);
-					break;
-				}
+					currentFileOpen = true;
+					currentFileSynced = false;
+					writtenByteCount = 0;
+					lastFrame = 0;
 
-				currentFileValid = true;
+					FRESULT writeHeaderResult = writeHeader(&currentFile);
+					if (writeHeaderResult != FR_OK)
+					{
+						dbgprintf("Slippi: failed to write header, errno: %d\r\n", writeHeaderResult);
+						break;
+					}
+
+					currentFileValid = true;
+					// tell the kiosk which Game Start this file is, and its name
+					if (gateSeq != 0)
+						RelayEXIGateOpened(gateSeq, gameStartTime);
+				}
 			}
 
 			if (!currentFileValid)
 			{
-				// we can reach this state if we SlippiRestoreReadPos into 
-				// the middle of a game due to usb insertion or SlpMemError
+				// we can reach this state if we SlippiRestoreReadPos into
+				// the middle of a game due to usb insertion or SlpMemError,
+				// or for a match the kiosk did not ask for (LazyTO)
 				// skip over and don't write anything until we see the start of a new game
-				if (replaysLED)
-					flashLED();
+				// LazyTO: everything available now, not one chunk per cycle (a
+				// long skipped match could outrun 4 KB per 100 ms, overflow the
+				// ring and lose the next match's start), and without the LED
 				memReadPos += reader.lastReadResult.bytesRead;
-				break;
+				if (cutShort)
+					dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
+				if (reader.lastReadResult.bytesRead == 0)
+					break;
+				continue;
 			}
 
 			// Always seek first in case there was a previous failure with partial write
@@ -386,16 +428,40 @@ static u32 SlippiHandlerThread(void *arg)
 				dbgprintf("Slippi: failed to write data, errno: %d\r\n", writeResult);
 				break;
 			}
+			else if (cutShort && wrote != reader.lastReadResult.bytesRead)
+			{
+				// all or nothing, so the next read still starts at a
+				// command: tried again next cycle, from the same place
+				dbgprintf("Slippi: wrote %u of %u bytes of a match without Game End\r\n", wrote, reader.lastReadResult.bytesRead);
+				break;
+			}
 			else
 			{
 				// Only increment mem read position when the write fully succeeds
 				memReadPos += wrote;
 				writtenByteCount += wrote;
+				lastFrame = reader.metadata.lastFrame;
+
+				// LazyTO: one f_sync after the first data block of each
+				// recording (Event Payloads and Game Start), some 0.2-0.3 s in
+				// (estimated). The directory entry then owns the cluster chain,
+				// so a recording cut off later (Wii off, exit to the loader,
+				// beamer unplugged) is a file with a size, not a 0-byte entry
+				// with leaked clusters, and the beamer can see the game as
+				// live. Upstream #66 dropped the per-write syncs for flash
+				// wear; this is one per file. A failed sync leaves the file
+				// usable, so it is only logged.
+				if (!currentFileSynced && !reader.lastReadResult.isGameEnd)
+				{
+					FRESULT syncResult = f_sync(&currentFile);
+					if (syncResult != FR_OK)
+						dbgprintf("Slippi: failed to sync new file, errno: %d\r\n", syncResult);
+					currentFileSynced = true;
+				}
 
 				if (reader.lastReadResult.isGameEnd)
 				{
 					dbgprintf("Completing File...\r\n");
-					lastFrame = reader.metadata.lastFrame;
 					FRESULT completeResult = completeFile(&currentFile, lastFrame, writtenByteCount);
 					if (completeResult != FR_OK)
 					{
@@ -420,6 +486,8 @@ static u32 SlippiHandlerThread(void *arg)
 				}
 				else if (replaysLED)
 					flashLED();
+				if (cutShort)
+					dbgprintf("Slippi: match ended without Game End, on to the next one\r\n");
 			}
 		}
 	}

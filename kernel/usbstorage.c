@@ -180,6 +180,69 @@ static bool __ioctl_running = false;
 static bool __main_thread_dirty = false;
 static bool __slippi_thread_dirty = false;
 
+/* LazyTO: counts mounts since boot (USBStorage_Open, __has_device_after_change),
+ * so the relay thread can tell a re-inserted or swapped drive (RelayEXI.c, the
+ * beamer mailbox). */
+static u32 __mount_id = 0;
+
+/* LazyTO: the USB lock. In hotswap mode (the game boots from SD, USB is the
+ * Slippi replay drive) two threads run SCSI cycles: the Slippi file writer
+ * (FatFS through diskio.c disk_read_usb/disk_write_usb, plus the hotplug
+ * re-probe in USBStorage_IsInserted_SlippiThread) and the relay thread's beamer
+ * mailbox (RelayEXI.c). They share cbw_buffer, transferbuffer, the CBW tag and
+ * __mounted_device, so every cycle and the re-probe run under this lock. A
+ * one-token message queue: lock = take the token (the thread sleeps until it
+ * is there), unlock = put it back. Both users are threads that may wait; the
+ * main loop and the EXI hooks never take it (the boot-time f_mount in main.c
+ * does, before any of those threads exists). Not reentrant: only the public
+ * entry points below lock, the static helpers they call never do.
+ * The writer waits for the token as long as it takes. The relay thread waits at
+ * most what is left of its request's budget (__usb_lock_within): a beamer can
+ * hold one of the writer's SCSI cycles for up to 30 s while it recovers its SD
+ * card (LazyTO docs/redesign.md, Other mailbox fixes), and the kiosk is to hear
+ * LF_USB_BUSY within 3 s, not wait that out.
+ * Booting the game from USB there is no lock (usb_lock stays -1): the main
+ * loop (GCNCard_Save) and the DI thread read the drive then, and the relay
+ * never touches USB in that mode (RelayEXI.c beamer_usb). */
+#define USB_LOCK_TOKEN	((struct ipcmessage *)0x55534221)	/* any non-NULL word */
+#define USB_LOCK_POLL_MS	1	/* __usb_lock_within: try again this often */
+static s32 usb_lock = -1;
+static u32 usb_lock_heap[8] ALIGNED(32);
+
+static void __usb_lock(void)
+{
+	struct ipcmessage *token;
+	if (usb_lock >= 0)
+		mqueue_recv(usb_lock, &token, 0);
+}
+
+/* Take the token within wait_ms or give up. IOS's receive with flags 1 does not
+ * wait and returns a negative error while the queue is empty (the kernel's
+ * non-blocking message flag, as decaf-emu models the Wii U's IOSU; not yet seen
+ * on a Wii), so this waiter polls. The writer's blocking receive (flags 0,
+ * __usb_lock) is untouched. True: the lock is held. */
+static bool __usb_lock_within(u32 wait_ms)
+{
+	struct ipcmessage *token;
+	u32 start;
+	if (usb_lock < 0)
+		return true;
+	start = read32(HW_TIMER);
+	while (mqueue_recv(usb_lock, &token, 1) < 0)
+	{
+		if (TimerDiffMs(start) >= wait_ms)
+			return false;
+		mdelay(USB_LOCK_POLL_MS);
+	}
+	return true;
+}
+
+static void __usb_unlock(void)
+{
+	if (usb_lock >= 0)
+		mqueue_send(usb_lock, USB_LOCK_TOKEN, 0);
+}
+
 static s32 __usbstorage_reset(important_storage_data *dev);
 
 static s32 __send_cbw(important_storage_data *dev, u8 lun, u32 len, u8 flags, const u8 *cb, u8 cbLen)
@@ -324,6 +387,8 @@ void USBStorage_Open()
 	usb_s_cnt = __mounted_device.sector_count;
 
 	__mounted = __mounted_device.vid != 0 || __mounted_device.pid != 0;
+	if (__mounted)
+		__mount_id++;
 
 	if(transferbuffer == NULL)
 		transferbuffer = (u8*)malloca(MAX_TRANSFER_SIZE_V5, 32);
@@ -361,6 +426,11 @@ s32 USBStorage_Startup(bool hotswap)
 
 	if (hotswap)
 	{
+		usb_lock = mqueue_create(usb_lock_heap, 1);
+		if (usb_lock < 0)
+			return usb_lock;
+		mqueue_send(usb_lock, USB_LOCK_TOKEN, 0);
+
 		memset32(AttachedDevices, 0, sizeof(usb_device_entry)*32);
 		venchangeheap = (u8*)malloca(32,32);
 		venchangequeue = mqueue_create(venchangeheap, 1);
@@ -373,7 +443,7 @@ s32 USBStorage_Startup(bool hotswap)
 	return 0;
 }
 
-bool USBStorage_ReadSectors(u32 sector, u32 numSectors, void *buffer)
+static bool __read_sectors(u32 sector, u32 numSectors, void *buffer)
 {
 	if (!__mounted)
 		return false;
@@ -400,7 +470,7 @@ bool USBStorage_ReadSectors(u32 sector, u32 numSectors, void *buffer)
 	return retval >= 0;
 }
 
-bool USBStorage_WriteSectors(u32 sector, u32 numSectors, const void *buffer)
+static bool __write_sectors(u32 sector, u32 numSectors, const void *buffer)
 {
 	if (!__mounted)
 		return false;
@@ -425,6 +495,62 @@ bool USBStorage_WriteSectors(u32 sector, u32 numSectors, const void *buffer)
 		retval = USBSTORAGE_ESTATUS;
 
 	return retval >= 0;
+}
+
+bool USBStorage_ReadSectors(u32 sector, u32 numSectors, void *buffer)
+{
+	bool ok;
+	__usb_lock();
+	ok = __read_sectors(sector, numSectors, buffer);
+	__usb_unlock();
+	return ok;
+}
+
+bool USBStorage_WriteSectors(u32 sector, u32 numSectors, const void *buffer)
+{
+	bool ok;
+	__usb_lock();
+	ok = __write_sectors(sector, numSectors, buffer);
+	__usb_unlock();
+	return ok;
+}
+
+s32 USBStorage_Mount(u32 wait_ms, u32 *mount, u32 *sector_size)
+{
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	*mount = __mounted ? __mount_id : 0;
+	*sector_size = __mounted ? __mounted_device.sector_size : 0;
+	__usb_unlock();
+	return USB_MB_OK;
+}
+
+/* The check and the cycle under one lock, so a drive swapped in by the
+ * hotplug re-probe in between is never read or written. */
+s32 USBStorage_ReadMounted(u32 mount, u32 sector, u32 numSectors, void *buffer, u32 wait_ms)
+{
+	s32 res;
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	if (!__mounted || __mount_id != mount)
+		res = USB_MB_GONE;
+	else
+		res = __read_sectors(sector, numSectors, buffer) ? USB_MB_OK : USB_MB_FAILED;
+	__usb_unlock();
+	return res;
+}
+
+s32 USBStorage_WriteMounted(u32 mount, u32 sector, u32 numSectors, const void *buffer, u32 wait_ms)
+{
+	s32 res;
+	if (!__usb_lock_within(wait_ms))
+		return USB_MB_BUSY;
+	if (!__mounted || __mount_id != mount)
+		res = USB_MB_GONE;
+	else
+		res = __write_sectors(sector, numSectors, buffer) ? USB_MB_OK : USB_MB_FAILED;
+	__usb_unlock();
+	return res;
 }
 
 void USBStorage_Close()
@@ -644,6 +770,7 @@ bool __has_device_after_change()
 						usb_s_size = __mounted_device.sector_size;
 						usb_s_cnt = __mounted_device.sector_count;
 						__mounted = true;
+						__mount_id++;
 
 						udelay(10000);
 						return true;
@@ -676,7 +803,9 @@ bool USBStorage_IsInserted_SlippiThread(void)
 {
 	if (__slippi_thread_dirty)
 	{
+		__usb_lock();
 		bool retval = __has_device_after_change();
+		__usb_unlock();
 
 		// if (!retval) dbgprintf("USBStorage: device removed, fd: %d\n", __mounted_device.usb_fd);
 

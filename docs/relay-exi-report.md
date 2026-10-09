@@ -2,6 +2,12 @@
 
 > Written on branch `reporter`; the current branch is `LazyTO`. Section 4 is superseded
 > and kept, marked, for history.
+>
+> **Protocol v2 (2026-10-07, branch `redesign`)** removes the Wii-network transport described
+> here: the TCP round trip, the beacon listener and request (3.7), the UDP telemetry socket,
+> `lazyto_station.txt` (3.6) and the card's secret. The LazyTO beamer on USB is the only link;
+> it holds the station number and the secret. What the kernel does now is in the header comment
+> of `kernel/RelayEXI.c` and in LazyTO's `docs/protocol-v2.md`.
 
 What was built on branch `reporter` for `../tournament-reporter/docs/architecture.md` section 6.2,
 following `docs/history/relay-exi-investigation.md` (R3: the EXI handler must never block). All
@@ -159,6 +165,8 @@ loader's nickname read (`SD_SLIPPI_DAT_FILE`, `common/include/Slippi.h:13`) and 
 ignored, both of `station` (0-65535) and `stream` (0 or 1) required. Missing file, file >= 512
 bytes, or either key missing/invalid -> `cfg.ok = false`. Since 2026-09-25 (decisions.md R15) the card
 has no relay address: `relay_ip`/`relay_port` from older cards are unknown keys and ignored.
+Optional `transport` (2026-10-01): `network` (also when absent) or `beamer`; any other value ->
+`cfg.ok = false`.
 
 ### 3.7 Relay discovery (decisions.md R15)
 
@@ -298,6 +306,10 @@ secret=<the relay's RELAY_SECRET>
   `START_SET` with `stream=1` from any station other than its configured stream station
   (`ST_NOT_STREAM`), so a mis-copied card cannot hijack the stream, but two cards with `stream=1`
   still means one station gets that error on every start.
+- `transport` (optional): `network` (the default) or `beamer`. With `beamer` requests and
+  telemetry go through a LazyTO beamer in the USB port instead of the Wii's network (the
+  `kernel/RelayEXI.c` header comment); it needs Slippi replays on and the ISO on SD, the Network
+  option can stay off, and until the beamer answers on USB every action shows `no beamer on usb`.
 - Plain ASCII, LF or CRLF, no spaces around `=`. Any missing or malformed key disables the relay
   for that Wii: the menu shows `no tournament.cfg` on every action.
 - Nintendont's own **Network** option must be on (it brings up IOS networking,
